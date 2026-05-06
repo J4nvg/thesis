@@ -1,0 +1,243 @@
+Beginning AutoGluon training...
+AutoGluon will save models to '/home/u808440/thesis/checkpoints/chronos2_zeroshot'
+=================== System Info ===================
+AutoGluon Version:  1.5.0
+Python Version:     3.12.13
+Operating System:   Linux
+Platform Machine:   x86_64
+Platform Version:   #1 SMP PREEMPT_DYNAMIC Debian 6.1.164-1 (2026-03-09)
+CPU Count:          64
+Pytorch Version:    2.9.1+cu128
+CUDA Version:       12.8
+GPU Memory:         GPU 0: 44.35/44.35 GB
+Total GPU Memory:   Free: 44.35 GB, Allocated: 0.00 GB, Total: 44.35 GB
+GPU Count:          1
+Memory Avail:       245.65 GB / 251.34 GB (97.7%)
+Disk Space Avail:   101890.24 GB / 244065.18 GB (41.7%)
+===================================================
+
+Fitting with arguments:
+{'enable_ensemble': False,
+ 'eval_metric': MASE,
+ 'freq': 'D',
+ 'hyperparameters': {'Chronos2': [{'ag_args': {'name_suffix': 'ZeroShot'}}]},
+ 'known_covariates_names': ['env_rus_holiday',
+                            'env_ua_holiday',
+                            'env_weather_wind_gusts_10m_mean',
+                            'env_weather_snowfall_sum',
+                            'env_weather_cloud_cover_mean',
+                            'env_weather_soil_temperature_0_to_100cm_mean',
+                            'env_weather_pressure_msl_max',
+                            'env_weather_cloud_cover_min',
+                            'env_weather_temperature_2m_max',
+                            'env_weather_precipitation_sum',
+                            'env_weather_wind_direction_10m_dominant',
+                            'env_weather_temperature_2m_min',
+                            'env_weather_sunshine_duration',
+                            'env_weather_pressure_msl_mean',
+                            'env_weather_pressure_msl_min',
+                            'env_weather_precipitation_hours',
+                            'env_weather_wind_speed_10m_mean',
+                            'env_weather_et0_fao_evapotranspiration',
+                            'env_weather_wind_speed_10m_max',
+                            'env_weather_temperature_2m_mean',
+                            'env_weather_cloud_cover_max',
+                            'env_weather_soil_moisture_0_to_100cm_mean',
+                            'env_k_max',
+                            'env_weather_shortwave_radiation_sum',
+                            'env_weather_rain_sum',
+                            'env_weather_daylight_duration',
+                            'env_weather_wind_gusts_10m_max'],
+ 'num_val_windows': 3,
+ 'prediction_length': 7,
+ 'quantile_levels': [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+ 'random_seed': 42,
+ 'refit_every_n_windows': 1,
+ 'refit_full': False,
+ 'skip_model_selection': False,
+ 'target': 'act_drone_strike_on_ua',
+ 'verbosity': 2}
+
+Provided train_data has 13560 rows, 20 time series. Median time series length is 678 (min=678, max=678). 
+
+Provided data contains following columns:
+	target: 'act_drone_strike_on_ua'
+	known_covariates:
+		categorical:        []
+		continuous (float): ['env_rus_holiday', 'env_ua_holiday', 'env_weather_...usts_10m_mean', 'env_weather_snowfall_sum', 'env_weather_cloud_cover_mean', 'env_weather_...to_100cm_mean', ...]
+	past_covariates:
+		categorical:        []
+		continuous (float): ['acled_other_rus_armed_clash', 'acled_other_...d_weapons_use', 'acled_other_...issile_attack', 'acled_other_ua_armed_clash', 'acled_other_...d_weapons_use', 'acled_other_...issile_attack', ...]
+	static_features:
+		categorical:        []
+		continuous (float): ['Activity_Level']
+
+To learn how to fix incorrectly inferred types, please see documentation for TimeSeriesPredictor.fit
+
+AutoGluon will gauge predictive performance using evaluation metric: 'MASE'
+	This metric's sign has been flipped to adhere to being higher_is_better. The metric score can be multiplied by -1 to get the metric value.
+===================================================
+
+Starting training. Start time is 2026-04-30 13:38:07
+Models that will be trained: ['Chronos2ZeroShot']
+Training timeseries model Chronos2ZeroShot. 
+	-1.1459       = Validation score (-MASE)
+	100.65  s     = Training runtime
+	2.46    s     = Validation (prediction) runtime
+Training complete. Models trained: ['Chronos2ZeroShot']
+Total runtime: 103.48 s
+Best model: Chronos2ZeroShot
+Best model score: -1.1459
+Warning: path already exists! This predictor may overwrite an existing predictor! path="/tmp/ag_chronos2_trial_t58_u_up"
+Warning: path already exists! This predictor may overwrite an existing predictor! path="/tmp/ag_chronos2_trial_ms_x4p7g"
+Warning: path already exists! This predictor may overwrite an existing predictor! path="/tmp/ag_chronos2_trial_3wmyagaq"
+Warning: path already exists! This predictor may overwrite an existing predictor! path="/tmp/ag_chronos2_trial_5tyq_qi4"
+Warning: path already exists! This predictor may overwrite an existing predictor! path="/tmp/ag_chronos2_trial_6cugipux"
+Warning: path already exists! This predictor may overwrite an existing predictor! path="/tmp/ag_chronos2_trial_btnchkqg"
+Warning: path already exists! This predictor may overwrite an existing predictor! path="/tmp/ag_chronos2_trial_tjbg7txa"
+Warning: path already exists! This predictor may overwrite an existing predictor! path="/tmp/ag_chronos2_trial_uev3bwhx"
+Warning: path already exists! This predictor may overwrite an existing predictor! path="/tmp/ag_chronos2_trial_56k487wi"
+Warning: path already exists! This predictor may overwrite an existing predictor! path="/tmp/ag_chronos2_trial__r4tcg9q"
+Warning: path already exists! This predictor may overwrite an existing predictor! path="/tmp/ag_chronos2_trial_ya2qyoa3"
+Warning: path already exists! This predictor may overwrite an existing predictor! path="/tmp/ag_chronos2_trial_r1sjbwh6"
+Beginning AutoGluon training...
+AutoGluon will save models to '/home/u808440/thesis/checkpoints/chronos2_best'
+=================== System Info ===================
+AutoGluon Version:  1.5.0
+Python Version:     3.12.13
+Operating System:   Linux
+Platform Machine:   x86_64
+Platform Version:   #1 SMP PREEMPT_DYNAMIC Debian 6.1.164-1 (2026-03-09)
+CPU Count:          64
+Pytorch Version:    2.9.1+cu128
+CUDA Version:       12.8
+GPU Memory:         GPU 0: 44.33/44.35 GB
+Total GPU Memory:   Free: 44.33 GB, Allocated: 0.02 GB, Total: 44.35 GB
+GPU Count:          1
+Memory Avail:       243.93 GB / 251.34 GB (97.1%)
+Disk Space Avail:   101885.20 GB / 244064.34 GB (41.7%)
+===================================================
+
+Fitting with arguments:
+{'enable_ensemble': False,
+ 'eval_metric': MASE,
+ 'freq': 'D',
+ 'hyperparameters': {'Chronos2': {'ag_args': {'name_suffix': 'FT_best'},
+                                  'fine_tune': True,
+                                  'fine_tune_lr': 8.721349828452045e-05,
+                                  'fine_tune_steps': 1500}},
+ 'known_covariates_names': ['env_rus_holiday',
+                            'env_ua_holiday',
+                            'env_weather_wind_gusts_10m_mean',
+                            'env_weather_snowfall_sum',
+                            'env_weather_cloud_cover_mean',
+                            'env_weather_soil_temperature_0_to_100cm_mean',
+                            'env_weather_pressure_msl_max',
+                            'env_weather_cloud_cover_min',
+                            'env_weather_temperature_2m_max',
+                            'env_weather_precipitation_sum',
+                            'env_weather_wind_direction_10m_dominant',
+                            'env_weather_temperature_2m_min',
+                            'env_weather_sunshine_duration',
+                            'env_weather_pressure_msl_mean',
+                            'env_weather_pressure_msl_min',
+                            'env_weather_precipitation_hours',
+                            'env_weather_wind_speed_10m_mean',
+                            'env_weather_et0_fao_evapotranspiration',
+                            'env_weather_wind_speed_10m_max',
+                            'env_weather_temperature_2m_mean',
+                            'env_weather_cloud_cover_max',
+                            'env_weather_soil_moisture_0_to_100cm_mean',
+                            'env_k_max',
+                            'env_weather_shortwave_radiation_sum',
+                            'env_weather_rain_sum',
+                            'env_weather_daylight_duration',
+                            'env_weather_wind_gusts_10m_max'],
+ 'num_val_windows': 3,
+ 'prediction_length': 7,
+ 'quantile_levels': [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+ 'random_seed': 42,
+ 'refit_every_n_windows': 1,
+ 'refit_full': False,
+ 'skip_model_selection': False,
+ 'target': 'act_drone_strike_on_ua',
+ 'verbosity': 2}
+
+Provided train_data has 13560 rows, 20 time series. Median time series length is 678 (min=678, max=678). 
+
+Provided data contains following columns:
+	target: 'act_drone_strike_on_ua'
+	known_covariates:
+		categorical:        []
+		continuous (float): ['env_rus_holiday', 'env_ua_holiday', 'env_weather_...usts_10m_mean', 'env_weather_snowfall_sum', 'env_weather_cloud_cover_mean', 'env_weather_...to_100cm_mean', ...]
+	past_covariates:
+		categorical:        []
+		continuous (float): ['acled_other_rus_armed_clash', 'acled_other_...d_weapons_use', 'acled_other_...issile_attack', 'acled_other_ua_armed_clash', 'acled_other_...d_weapons_use', 'acled_other_...issile_attack', ...]
+	static_features:
+		categorical:        []
+		continuous (float): ['Activity_Level']
+
+To learn how to fix incorrectly inferred types, please see documentation for TimeSeriesPredictor.fit
+
+AutoGluon will gauge predictive performance using evaluation metric: 'MASE'
+	This metric's sign has been flipped to adhere to being higher_is_better. The metric score can be multiplied by -1 to get the metric value.
+===================================================
+
+Starting training. Start time is 2026-04-30 16:03:07
+Models that will be trained: ['Chronos2FT_best']
+Training timeseries model Chronos2FT_best. 
+	-1.1009       = Validation score (-MASE)
+	635.81  s     = Training runtime
+	1.87    s     = Validation (prediction) runtime
+Training complete. Models trained: ['Chronos2FT_best']
+Total runtime: 637.71 s
+Best model: Chronos2FT_best
+Best model score: -1.1009
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2ZeroShot
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best
+Model not specified in predict, will default to the model with the best validation score: Chronos2FT_best

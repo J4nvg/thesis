@@ -1,0 +1,41 @@
+{
+  "best_params": {
+    "fine_tune_lr": 8.721349828452045e-05,
+    "fine_tune_steps": 1500
+  },
+  "best_val_mase": null,
+  "n_trials": 12,
+  "num_val_windows": 3,
+  "prediction_length": 7,
+  "target": "act_drone_strike_on_ua",
+  "future_covariates": [
+    "env_rus_holiday",
+    "env_ua_holiday",
+    "env_weather_wind_gusts_10m_mean",
+    "env_weather_snowfall_sum",
+    "env_weather_cloud_cover_mean",
+    "env_weather_soil_temperature_0_to_100cm_mean",
+    "env_weather_pressure_msl_max",
+    "env_weather_cloud_cover_min",
+    "env_weather_temperature_2m_max",
+    "env_weather_precipitation_sum",
+    "env_weather_wind_direction_10m_dominant",
+    "env_weather_temperature_2m_min",
+    "env_weather_sunshine_duration",
+    "env_weather_pressure_msl_mean",
+    "env_weather_pressure_msl_min",
+    "env_weather_precipitation_hours",
+    "env_weather_wind_speed_10m_mean",
+    "env_weather_et0_fao_evapotranspiration",
+    "env_weather_wind_speed_10m_max",
+    "env_weather_temperature_2m_mean",
+    "env_weather_cloud_cover_max",
+    "env_weather_soil_moisture_0_to_100cm_mean",
+    "env_k_max",
+    "env_weather_shortwave_radiation_sum",
+    "env_weather_rain_sum",
+    "env_weather_daylight_duration",
+    "env_weather_wind_gusts_10m_max"
+  ],
+  "n_past_covariates": 83
+}

@@ -1,0 +1,35 @@
+{
+    "little": [
+        "crimea",
+        "zakarpattia",
+        "volyn",
+        "chernivtsi",
+        "ternopil"
+    ],
+    "low": [
+        "zhytomyr",
+        "cherkasy",
+        "poltava",
+        "lviv",
+        "khmelnytskyi",
+        "kirovohrad",
+        "ivano-frankivsk",
+        "luhansk",
+        "vinnytsia",
+        "rivne"
+    ],
+    "medium": [
+        "kyiv",
+        "mykolaiv",
+        "odesa",
+        "donetsk"
+    ],
+    "high": [
+        "chernihiv",
+        "sumy",
+        "kharkiv",
+        "kherson",
+        "zaporizhia",
+        "dnipropetrovsk"
+    ]
+}

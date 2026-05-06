@@ -1,0 +1,18 @@
+{
+  "primary_actors": [
+    "rus",
+    "ua"
+  ],
+  "secondary_actors_red": [
+    "iran",
+    "belarus",
+    "centralasia",
+    "dprk",
+    "china"
+  ],
+  "secondary_actors_blue": [
+    "eu",
+    "us",
+    "nato"
+  ]
+}
