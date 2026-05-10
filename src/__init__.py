@@ -19,7 +19,7 @@ from .dataset_specific_tools import load_actors_dict,aggregate_gdelt_primary_sec
 from .dataset_specific_tools import get_pivoted_table,remove_low_prevalence,load_region_activity_dictionary
 
 from .prevalent_functions import get_common_kwargs,load_data,get_engineered_features,get_available_threads,split_future_and_past_cov
-from .prevalent_functions import get_top_100_from_lgbm
+from .prevalent_functions import get_top_100_from_lgbm,get_engineered_features_damageclassifiers
 
 from .dummy_tools import get_dummy_nday_forecast
 
@@ -38,6 +38,8 @@ from .evaluation_tools import (
     _maybe_scale_covs,
     run_expanding_cv,
     run_expanding_cv_iter,
+    run_expanding_cv_per_activity,
+    run_expanding_cv_per_region,
     plot_region_horizon_heatmap,
     feature_importances_per_horizon,
     run_final_test,

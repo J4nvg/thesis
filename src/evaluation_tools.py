@@ -75,12 +75,17 @@ def _skill(model_val, ref_val):
 # Evaluation aggregator (regression notebooks — scales required, no globals)
 # ---------------------------------------------------------------------------
 
-def evaluate_long(long_df, mae_scales, rmse_scales):
+def evaluate_long(long_df, mae_scales, rmse_scales, regions_activity=None):
     """Aggregate metrics over (region), (horizon), (region, horizon), and globally.
 
     mae_scales / rmse_scales: ``{region_name: float}`` dicts from
     ``compute_naive_scales``. Pass the training-set scales so the function
     never touches module-level state.
+
+    regions_activity: optional ``{region_name: int}`` dict (levels 1/2/3).
+    When provided, two extra views are added to the result:
+      ``per_activity_level``  — one row per activity level
+      ``per_activity_horizon`` — activity_level × horizon
     """
     def _rows_from_groupby(group_cols):
         rows = []
@@ -108,12 +113,42 @@ def evaluate_long(long_df, mae_scales, rmse_scales):
     global_row["MASE_median"] = float(per_region["MASE"].median())
     global_row["RMSSE_mean"]  = float(per_region["RMSSE"].mean())
 
-    return {
+    result = {
         "per_region":         per_region,
         "per_horizon":        per_horizon,
         "per_region_horizon": per_region_horizon,
         "global":             global_row,
     }
+
+    if regions_activity is not None:
+        df2 = long_df.copy()
+        df2["activity_level"] = df2["region"].map(regions_activity)
+
+        act_rows = []
+        for level, sub in df2.groupby("activity_level"):
+            row = base_metrics(sub["y_true"], sub["y_pred"])
+            pr_sub = per_region[per_region["region"].isin(sub["region"].unique())]
+            row["MASE_mean"]      = float(pr_sub["MASE"].mean())
+            row["RMSSE_mean"]     = float(pr_sub["RMSSE"].mean())
+            row["activity_level"] = level
+            act_rows.append(row)
+        result["per_activity_level"] = (
+            pd.DataFrame(act_rows).sort_values("activity_level").reset_index(drop=True)
+        )
+
+        ah_rows = []
+        for (level, h), sub in df2.groupby(["activity_level", "horizon"]):
+            row = base_metrics(sub["y_true"], sub["y_pred"])
+            row["activity_level"] = level
+            row["horizon"]        = int(h)
+            ah_rows.append(row)
+        result["per_activity_horizon"] = (
+            pd.DataFrame(ah_rows)
+              .sort_values(["activity_level", "horizon"])
+              .reset_index(drop=True)
+        )
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -513,7 +548,7 @@ def plot_region_horizon_heatmap(
     vmin=None,
     vmax=None,
 ):
-    """Heatmap of a metric across regions × horizon days.
+    """Heatmap of a metric across regions * horizon days.
 
     vmin / vmax
         When both are None (default) the colour scale is derived from the
@@ -542,6 +577,112 @@ def plot_region_horizon_heatmap(
     plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
     plt.tight_layout()
     return ax
+
+
+# ---------------------------------------------------------------------------
+# Feature importance
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Per-group training helpers
+# ---------------------------------------------------------------------------
+
+def run_expanding_cv_per_activity(
+    builder_fn,
+    target_list,
+    region_names,
+    regions_activity,
+    start_frac,
+    *,
+    horizon: int,
+    predict_stride: int = 1,
+    retrain_stride: int,
+    past_covs=None,
+    future_covs=None,
+    is_neural: bool = False,
+    verbose: bool = True,
+):
+    """Train one model per activity-level group (levels 1, 2, 3).
+
+    Internally calls ``run_final_test`` with decoupled predict_stride / retrain_stride,
+    so daily predictions are issued even when retraining is weekly.  Pass
+    ``target_for_cv`` + ``CV_START_VAL`` for the validation phase, or the full
+    ``target_list`` + ``TRAIN_VAL_END`` for the test phase.
+
+    Returns fold_preds assembled in the original region order so
+    ``collect_predictions_long`` works unchanged.
+    """
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for i, region in enumerate(region_names):
+        groups[regions_activity[region]].append(i)
+
+    all_fold_preds = [None] * len(target_list)
+
+    for level in sorted(groups):
+        indices = groups[level]
+        if verbose:
+            print(f"\n--- Activity level {level} ({len(indices)} regions) ---")
+        group_targets = [target_list[i] for i in indices]
+        group_past    = [past_covs[i]   for i in indices] if past_covs   is not None else None
+        group_future  = [future_covs[i] for i in indices] if future_covs is not None else None
+
+        group_preds = run_final_test(
+            builder_fn, group_targets, start_frac,
+            horizon=horizon,
+            predict_stride=predict_stride,
+            retrain_stride=retrain_stride,
+            past_covs=group_past,
+            future_covs=group_future,
+            is_neural=is_neural,
+            verbose=verbose,
+        )
+        for group_idx, orig_idx in enumerate(indices):
+            all_fold_preds[orig_idx] = group_preds[group_idx]
+
+    return all_fold_preds
+
+
+def run_expanding_cv_per_region(
+    builder_fn,
+    target_list,
+    start_frac,
+    *,
+    horizon: int,
+    predict_stride: int = 1,
+    retrain_stride: int,
+    past_covs=None,
+    future_covs=None,
+    is_neural: bool = False,
+    verbose: bool = True,
+):
+    """Train one independent model per region (local model with its own covariates).
+
+    Internally calls ``run_final_test`` per region with a single-element list so
+    each model never sees other regions' data.  Decoupled predict_stride /
+    retrain_stride so daily predictions are issued between weekly retrains.
+    Works for both CV and test phases via ``start_frac``.
+
+    Returns fold_preds in original region order.
+    """
+    all_fold_preds = []
+    for i in range(len(target_list)):
+        if verbose:
+            print(f"\n--- Region {i + 1}/{len(target_list)} ---")
+        region_preds = run_final_test(
+            builder_fn,
+            [target_list[i]],
+            start_frac,
+            horizon=horizon,
+            predict_stride=predict_stride,
+            retrain_stride=retrain_stride,
+            past_covs=[past_covs[i]]   if past_covs   is not None else None,
+            future_covs=[future_covs[i]] if future_covs is not None else None,
+            is_neural=is_neural,
+            verbose=verbose,
+        )
+        all_fold_preds.append(region_preds[0])
+    return all_fold_preds
 
 
 # ---------------------------------------------------------------------------

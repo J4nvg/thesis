@@ -3,7 +3,6 @@
 #SBATCH -N 1                    # Request 1 Node
 #SBATCH --gres=gpu:1            # CRITICAL: Request 1 GPU 
 #SBATCH --cpus-per-task=4
-#SBATCH -t 1-00:00:00           # 1 day limit
 #SBATCH -o slurm_lstm_%j.out
 #SBATCH -e slurm_lstm_%j.err
 

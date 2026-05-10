@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH -p GPUExtended          # Use GPUExtended since tuning takes a while
+#SBATCH -p GPU                  # Use the standard GPU partition
 #SBATCH -N 1                    # Request 1 Node
-#SBATCH --cpus-per-task=64      # Request all 64 CPU cores
-#SBATCH -t 1-00:00:00           # Set time limit to 1 day (Adjust if needed)
+#SBATCH --gres=gpu:1            # CRITICAL: Request 1 GPU
+#SBATCH --cpus-per-task=4
 #SBATCH -o slurm_gbdt_%j.out  # Standard output log (%j adds the job ID)
 #SBATCH -e slurm_gbdt_%j.err  # Standard error log
 

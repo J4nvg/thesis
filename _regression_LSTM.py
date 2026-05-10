@@ -92,11 +92,12 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 pd.set_option("display.max_columns", 80)
 pd.set_option("display.width", 180)
+available_threads = get_available_threads()
+print(f'CPU count: {available_threads}')
 
 
 # 
-available_threads = get_available_threads()
-print(f'CPU count: {available_threads}')
+
 # In[36]:
 
 
@@ -112,7 +113,7 @@ INPUT_LAGS        = 7
 MULTI_MODELS      = True
 
 TRAIN_FRAC, VAL_FRAC, TEST_FRAC = 0.70, 0.10, 0.20
-CV_STRIDE                       = 7
+CV_STRIDE                       = 1
 
 # ---- Model groups ---------------------------------------------------------
 NAIVE_MODELS  = {"naive_last", "naive_weekly"}
@@ -326,7 +327,7 @@ from pytorch_lightning.callbacks import EarlyStopping
 # --- Shared forecasting skeleton: every tabular model gets the same inputs ---
 COMMON_KWARGS_TAB = get_common_kwargs()
 
-ES_NN  = EarlyStopping(monitor="val_loss",   patience=10, min_delta=1e-4, mode="min")
+ES_NN  = EarlyStopping(monitor="train_loss",   patience=10, min_delta=1e-4, mode="min")
 # ES = EarlyStopping(
 #     monitor="train_loss",   # use "val_loss" if you pass val_series to .fit()
 #     patience=5,
@@ -796,10 +797,11 @@ MAE_SCALES, RMSE_SCALES = compute_naive_scales(
 # _maybe_scale_covs imported from src
 
 def run_manual_expanding_cv(name):
-    """Expanding-window CV with a fresh model per fold.
+    """Expanding-window CV with decoupled predict / retrain strides.
 
-    Returns ``list[list[TimeSeries]]`` — outer by region, inner by fold,
-    matching the shape produced by Darts' ``historical_forecasts``.
+    Predicts every CV_STRIDE days; retrains every OUTPUT_CHUNK_LEN days.
+    Between retrains the frozen model predicts from a growing context window.
+    Returns ``list[list[TimeSeries]]`` -- outer by region, inner by prediction step.
     """
     ref_ts    = target_for_cv[0]                 # shared time axis
     n_total   = len(ref_ts)
@@ -807,11 +809,13 @@ def run_manual_expanding_cv(name):
 
     n_regions      = len(target_for_cv)
     all_fold_preds = [[] for _ in range(n_regions)]
-    n_folds        = 0
+    n_preds    = 0
+    n_retrains = 0
+    model      = None
+    _local_builder = None
 
     is_local   = name in LOCAL_MODELS
     is_neural  = name in NEURAL_MODELS
-    # Scale covariates for neural nets
     needs_scaling = is_neural
 
     past_for_fit, fut_for_fit = _maybe_scale_covs(
@@ -819,27 +823,39 @@ def run_manual_expanding_cv(name):
     )
 
     for t0 in range(start_idx, n_total - OUTPUT_CHUNK_LEN + 1, CV_STRIDE):
-        split_time   = ref_ts.time_index[t0]
-        train_series = [ts.drop_after(split_time) for ts in target_for_cv]
+        steps_since_start = t0 - start_idx
+        split_time        = ref_ts.time_index[t0]
+
+        if steps_since_start % OUTPUT_CHUNK_LEN == 0:
+            train_series = [ts.drop_after(split_time) for ts in target_for_cv]
+            if is_local:
+                _local_builder = lambda n=name: build_regressor(n)
+            else:
+                model = build_regressor(name)
+                fit_kwargs = {"series": train_series}
+                if model.supports_past_covariates:
+                    fit_kwargs["past_covariates"] = past_for_fit
+                if model.supports_future_covariates:
+                    fit_kwargs["future_covariates"] = fut_for_fit
+                model.fit(**fit_kwargs)
+            n_retrains += 1
+            print(f"   retrain {n_retrains}  (data up to {split_time.date()})")
+
+        pred_series = [ts.drop_after(split_time) for ts in target_for_cv]
 
         if is_local:
             # One model per region; ARIMA doesn't use covariates here.
             preds = []
-            for ts in train_series:
-                m = build_regressor(name)
+            for ts in pred_series:
+                m = _local_builder()
                 m.fit(ts)
                 preds.append(m.predict(n=OUTPUT_CHUNK_LEN))
         else:
-            model      = build_regressor(name)
-            fit_kwargs = {"series": train_series}
-            pred_kwargs = {"n": OUTPUT_CHUNK_LEN, "series": train_series}
+            pred_kwargs = {"n": OUTPUT_CHUNK_LEN, "series": pred_series}
             if model.supports_past_covariates:
-                fit_kwargs["past_covariates"]  = past_for_fit
                 pred_kwargs["past_covariates"] = past_for_fit
             if model.supports_future_covariates:
-                fit_kwargs["future_covariates"]  = fut_for_fit
                 pred_kwargs["future_covariates"] = fut_for_fit
-            model.fit(**fit_kwargs)
 
             # Probabilistic models (e.g. TFT + QuantileRegression) need
             # multiple MC samples before we can take a point estimate.
@@ -853,11 +869,9 @@ def run_manual_expanding_cv(name):
         for r_idx, pred in enumerate(preds):
             all_fold_preds[r_idx].append(pred)
 
-        n_folds += 1
-        if n_folds == 1 or n_folds % 4 == 0:
-            print(f"   fold {n_folds} done  (trained up to {split_time.date()})")
+        n_preds += 1
 
-    print(f"   {n_folds} folds complete")
+    print(f"   {n_preds} predictions, {n_retrains} retrains complete")
     return all_fold_preds
 
 
@@ -920,7 +934,7 @@ def _suggest_catboost_params(trial, objective_kind: str):
         "depth":         trial.suggest_int("depth", 4, 8),
         "learning_rate": trial.suggest_float("learning_rate", 1e-2, 2e-1, log=True),
         "iterations":    trial.suggest_int("iterations", 200, 1000, step=100),
-        "l2_leaf_reg":   trial.suggest_discrete_uniform("l2_leaf_reg", 1.0, 5.0, 0.5),
+        "l2_leaf_reg":   trial.suggest_float("l2_leaf_reg", 1.0, 5.0, step=0.5),
         "subsample":     trial.suggest_float("subsample", 0.6, 1.0),
     }
     if objective_kind == "tweedie":
@@ -1012,9 +1026,9 @@ def _suggest_lstm_params(trial, objective_kind: str, input_chunk_length: int, mo
             "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True),
         },
         random_state        = RANDOM_STATE,
-        add_encoders        = {"cyclic": {
+        add_encoders        = {                "cyclic": {
                     "past": ["month", "week", "dayofyear", "dayofweek", "day"]
-                           },}
+                           }},
     )
     extras = {}
     if objective_kind == "tweedie":
@@ -1041,13 +1055,14 @@ def make_gbm_objective(variant: str):
         last_score = None
         for step, cumulative_fold_preds in enumerate(run_expanding_cv_iter(
             builder,
-            target_list = target_for_cv,
-            start_frac  = CV_START_VAL,
-            horizon     = OUTPUT_CHUNK_LEN,
-            stride      = CV_STRIDE,
-            past_covs   = full_past_covs,
-            future_covs = full_fut_covs,
-            verbose     = False,
+            target_list    = target_for_cv,
+            start_frac     = CV_START_VAL,
+            horizon        = OUTPUT_CHUNK_LEN,
+            stride         = CV_STRIDE,
+            retrain_stride = OUTPUT_CHUNK_LEN,
+            past_covs      = full_past_covs,
+            future_covs    = full_fut_covs,
+            verbose        = False,
         )):
             last_score = _score_fold_preds(
                 cumulative_fold_preds, target_for_cv, region_names,
@@ -1091,14 +1106,15 @@ def make_nn_objective(variant: str):
 
         fold_preds = run_expanding_cv(
             builder,
-            target_list = target_for_cv,
-            start_frac  = CV_START_VAL,
-            horizon     = OUTPUT_CHUNK_LEN,
-            stride      = CV_STRIDE,
-            past_covs   = full_raw_past_covs_LSTM,
-            future_covs = full_fut_covs,
-            is_neural   = True,
-            verbose     = False,
+            target_list    = target_for_cv,
+            start_frac     = CV_START_VAL,
+            horizon        = OUTPUT_CHUNK_LEN,
+            stride         = CV_STRIDE,
+            retrain_stride = OUTPUT_CHUNK_LEN,
+            past_covs      = full_raw_past_covs_LSTM,
+            future_covs    = full_fut_covs,
+            is_neural      = True,
+            verbose        = False,
         )
 
 
@@ -1218,11 +1234,9 @@ def _build_lstm_from_best(variant: str, best: dict):
         n_epochs            = 100,
         optimizer_kwargs    = {"lr": b["lr"], "weight_decay": b["weight_decay"]},
         random_state        = RANDOM_STATE,
-        add_encoders = {
-                "cyclic": {
+                add_encoders        = {                "cyclic": {
                     "past": ["month", "week", "dayofyear", "dayofweek", "day"]
-                           },
-                },
+                           }},
         pl_trainer_kwargs   = _nn_trainer_kwargs(variant=variant), 
     )
     return lambda: build_lstm_count(objective_kind, params, tweedie_power=tw_p)
@@ -1247,13 +1261,14 @@ for variant, best_params in best_params_by_variant.items():
 
     fold_preds = run_expanding_cv(
         builder,
-        target_list = target_for_cv,
-        start_frac  = CV_START_VAL,
-        horizon      = OUTPUT_CHUNK_LEN,
-        stride       = CV_STRIDE,
-        past_covs   = chosen_past_covs,      
-        future_covs = full_fut_covs,
-        is_neural   = is_neural,
+        target_list    = target_for_cv,
+        start_frac     = CV_START_VAL,
+        horizon        = OUTPUT_CHUNK_LEN,
+        stride         = CV_STRIDE,
+        retrain_stride = OUTPUT_CHUNK_LEN,
+        past_covs      = chosen_past_covs,
+        future_covs    = full_fut_covs,
+        is_neural      = is_neural,
     )
 
     long_df = collect_predictions_long(target_for_cv, fold_preds, region_names)
@@ -1354,9 +1369,11 @@ for variant, best_params in best_params_by_variant.items():
     if variant in NN_VARIANTS:
         builder   = _build_lstm_from_best(variant, best_params)
         is_neural = True
+        chosen_past = full_raw_past_covs_LSTM
     else:
         builder   = lambda p=best_params, v=variant: build_gbm_from_params(v, p)
         is_neural = False
+        chosen_past = full_past_covs
 
     fold_preds = run_final_test(
         builder,
@@ -1365,7 +1382,7 @@ for variant, best_params in best_params_by_variant.items():
         predict_stride = 1,
         retrain_stride = OUTPUT_CHUNK_LEN,
         horizon        = OUTPUT_CHUNK_LEN,
-        past_covs      = full_past_covs,
+        past_covs      = chosen_past,
         future_covs    = full_fut_covs,
         is_neural      = is_neural,
     )
@@ -1399,20 +1416,146 @@ test_leaderboard = (
 print(test_leaderboard)
 
 
+# ## Per-activity-level model comparison
+# 
+# Each tuned variant is re-run with one additional training paradigm:
+# 
+# - **Activity-level model**: one model per conflict-intensity group (low / medium / high), trained only on the homogeneous subset of regions it owns.
+# 
+# Per-region (local) training is **excluded** for neural variants — it would require 20× the retrains per fold, making it computationally prohibitive.
+# 
+# Uses `predict_stride=1` / `retrain_stride=OUTPUT_CHUNK_LEN` (same decoupled stride as the test evaluation above).
+# Results are compared against the global model in a leaderboard at the end of this section.
+
 # In[ ]:
 
 
+activity_cv_long_by_model = {}
 
+for variant, best_params in best_params_by_variant.items():
+    name = f"{variant}_tuned"
+    if variant in NN_VARIANTS:
+        builder   = _build_lstm_from_best(variant, best_params)
+        is_neural = True
+        chosen_past = full_raw_past_covs_LSTM
+
+    else:
+        builder   = lambda p=best_params, v=variant: build_gbm_from_params(v, p)
+        is_neural = False
+        chosen_past = full_past_covs
+
+    print(f"\n=== Activity-level CV: {name} ===")
+    fp = run_expanding_cv_per_activity(
+        builder, target_for_cv, region_names, regions_activity, CV_START_VAL,
+        horizon=OUTPUT_CHUNK_LEN, predict_stride=1, retrain_stride=OUTPUT_CHUNK_LEN, 
+        past_covs      = chosen_past,
+        future_covs=full_fut_covs, is_neural=is_neural,
+    )
+    activity_cv_long_by_model[name] = collect_predictions_long(target_for_cv, fp, region_names)
 
 
 # In[ ]:
 
 
+activity_test_long_by_model = {}
 
+for variant, best_params in best_params_by_variant.items():
+    name = f"{variant}_tuned"
+    if variant in NN_VARIANTS:
+        builder   = _build_lstm_from_best(variant, best_params)
+        is_neural = True
+        chosen_past = full_raw_past_covs_LSTM
+    else:
+        builder   = lambda p=best_params, v=variant: build_gbm_from_params(v, p)
+        is_neural = False
+        chosen_past = full_past_covs
+
+    print(f"\n=== Activity-level test: {name} ===")
+    fp = run_expanding_cv_per_activity(
+        builder, target_full, region_names, regions_activity, TEST_START_FRAC,
+        horizon=OUTPUT_CHUNK_LEN, predict_stride=1, retrain_stride=OUTPUT_CHUNK_LEN,
+        past_covs      = chosen_past,
+          future_covs=full_fut_covs, is_neural=is_neural,
+    )
+    activity_test_long_by_model[name] = collect_predictions_long(target_full, fp, region_names)
 
 
 # In[ ]:
 
 
+import pandas as pd
 
+# CV leaderboard: global vs activity-level
+lb_rows = []
+for name, long_df in long_by_model.items():
+    res = evaluate_long(long_df, MAE_SCALES, RMSE_SCALES, regions_activity)
+    lb_rows.append({"model": name, "paradigm": "global",   **res["global"]})
+
+for name, long_df in activity_cv_long_by_model.items():
+    res = evaluate_long(long_df, MAE_SCALES, RMSE_SCALES, regions_activity)
+    lb_rows.append({"model": name, "paradigm": "activity", **res["global"]})
+
+cv_leaderboard = pd.DataFrame(lb_rows).sort_values("MASE_mean").reset_index(drop=True)
+print("=== CV leaderboard (global vs activity-level) ===")
+print(cv_leaderboard)
+
+# Test leaderboard
+lb_test_rows = []
+for name, long_df in test_long_by_model.items():
+    res = evaluate_long(long_df, MAE_SCALES, RMSE_SCALES, regions_activity)
+    lb_test_rows.append({"model": name, "paradigm": "global",   **res["global"]})
+
+for name, long_df in activity_test_long_by_model.items():
+    res = evaluate_long(long_df, MAE_SCALES, RMSE_SCALES, regions_activity)
+    lb_test_rows.append({"model": name, "paradigm": "activity", **res["global"]})
+
+test_leaderboard = pd.DataFrame(lb_test_rows).sort_values("MASE_mean").reset_index(drop=True)
+print("\n=== Test leaderboard (global vs activity-level) ===")
+print(test_leaderboard)
+
+
+# In[ ]:
+
+
+# ── Persist all results ───────────────────────────────────────────────────────
+import json
+from pathlib import Path
+
+RESULTS_DIR = Path("results/lstm")
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _safe(name):
+    return name.replace("/", "_").replace(" ", "_")
+
+def _save_group(long_dict, split, paradigm):
+    rows = []
+    for name, long_df in long_dict.items():
+        key = f"{split}_{paradigm}_{_safe(name)}"
+        res = evaluate_long(long_df, MAE_SCALES, RMSE_SCALES, regions_activity)
+        long_df.to_parquet(RESULTS_DIR / f"predictions_long_{key}.parquet", index=False)
+        res["per_region"].to_csv(         RESULTS_DIR / f"per_region_{key}.csv",         index=False)
+        res["per_horizon"].to_csv(        RESULTS_DIR / f"per_horizon_{key}.csv",        index=False)
+        res["per_region_horizon"].to_csv( RESULTS_DIR / f"per_region_horizon_{key}.csv", index=False)
+        with open(RESULTS_DIR / f"global_{key}.json", "w") as fh:
+            json.dump(res["global"], fh, indent=2, default=float)
+        for view in ("per_activity_level", "per_activity_horizon"):
+            if view in res:
+                res[view].to_csv(RESULTS_DIR / f"{view}_{key}.csv", index=False)
+        rows.append({"split": split, "paradigm": paradigm, "model": name, **res["global"]})
+        print(f"  saved: {split}/{paradigm}/{name}")
+    return rows
+
+lb_rows = []
+lb_rows += _save_group(long_by_model,                                      "cv",   "global")
+lb_rows += _save_group(activity_cv_long_by_model,                          "cv",   "activity")
+lb_rows += _save_group(globals().get("local_cv_long_by_model",   {}),      "cv",   "local")
+lb_rows += _save_group(test_long_by_model,                                 "test", "global")
+lb_rows += _save_group(activity_test_long_by_model,                        "test", "activity")
+lb_rows += _save_group(globals().get("local_test_long_by_model", {}),      "test", "local")
+
+pd.DataFrame(lb_rows).sort_values(["split", "MASE_mean"]).reset_index(drop=True).to_csv(
+    RESULTS_DIR / "leaderboard.csv", index=False
+)
+print(f"\nAll results in: {RESULTS_DIR.resolve()}")
+print(sorted(p.name for p in RESULTS_DIR.iterdir()))
 

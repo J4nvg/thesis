@@ -51,11 +51,6 @@ PROJECT_DIR = './'
 # In[ ]:
 
 
-
-
-# In[ ]:
-
-
 # !pip install "darts[all]" statsmodels optuna comet_ml
 
 
@@ -103,10 +98,9 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 pd.set_option("display.max_columns", 80)
 pd.set_option("display.width", 180)
-
-
-available_threads = get_available_threads()
+available_threads = 4
 print(f'CPU count: {available_threads}')
+
 
 # 
 
@@ -125,7 +119,7 @@ INPUT_LAGS        = 7
 MULTI_MODELS      = True
 
 TRAIN_FRAC, VAL_FRAC, TEST_FRAC = 0.70, 0.10, 0.20
-CV_STRIDE                       = 7
+CV_STRIDE                       = 1
 
 # ---- Model groups ---------------------------------------------------------
 # Basic regressors only — all use plain regression losses (MSE / RMSE).
@@ -166,7 +160,7 @@ regions,master_timeseries,regions_activity = load_data(data_path=FIXED_DATA_PATH
 for_global_reset, global_weather_columns = get_engineered_features(
     master_timeseries=master_timeseries,
     data_path=FIXED_DATA_PATH,
-    target_col="TARGET",
+    target_col=TARGET,
     regions=regions,
     regions_activity=regions_activity,
     binarize_target=False
@@ -366,8 +360,9 @@ def build_regressor(name: str):
             reg_alpha         = 0.0,
             reg_lambda        = 1.0,
             tree_method       = "hist",
-            device            = "cpu",
-            n_jobs            = available_threads,
+            device       = "cuda",
+            # device            = "cpu",
+            # n_jobs            = available_threads,
             random_state      = RANDOM_STATE,
             verbosity         = 0,
         )
@@ -383,8 +378,9 @@ def build_regressor(name: str):
             l2_leaf_reg       = 3,
             subsample         = 0.8,
             bootstrap_type    = "Bernoulli",
-            task_type         = "CPU",
-            thread_count      = available_threads,
+            task_type          = "GPU",
+            # task_type         = "CPU",
+            # thread_count      = available_threads,
             random_seed       = RANDOM_STATE,
             verbose           = False,
         )
@@ -409,11 +405,9 @@ def build_regressor(name: str):
             batch_size          = 64,
             n_epochs            = 30,
             random_state        = RANDOM_STATE,
-            add_encoders = {
-                "cyclic": {
+                            add_encoders        =                 {"cyclic": {
                     "past": ["month", "week", "dayofyear", "dayofweek", "day"]
-                           },
-                },
+                           }},
             pl_trainer_kwargs   = NN_TRAINER_KWARGS,
         )
 
@@ -717,6 +711,7 @@ def run_expanding_cv(
     is_neural=False,
     horizon=OUTPUT_CHUNK_LEN,
     stride=CV_STRIDE,
+    retrain_stride=OUTPUT_CHUNK_LEN,
     past_covs=None,
     future_covs=None,
     verbose=True,
@@ -725,6 +720,7 @@ def run_expanding_cv(
 
     target_log_list -- log(1+y) targets that the model is trained / predicted on
     start_frac      -- fraction of the log series at which CV starts
+    retrain_stride  -- retrain every this many prediction steps (default: OUTPUT_CHUNK_LEN)
     """
     ref_log   = target_log_list[0]
     n_total   = len(ref_log)
@@ -732,34 +728,50 @@ def run_expanding_cv(
 
     n_regions      = len(target_log_list)
     all_fold_preds = [[] for _ in range(n_regions)]
-    n_folds        = 0
+    n_preds    = 0
+    n_retrains = 0
+    model      = None
+    _local_builder = None
 
     past_for_fit, fut_for_fit = _maybe_scale_covs(
         past_covs, future_covs, do_scale=is_neural,
     )
 
     for t0 in range(start_idx, n_total - horizon + 1, stride):
-        split_time   = ref_log.time_index[t0]
-        train_series = [ts.drop_after(split_time) for ts in target_log_list]
+        steps_since_start = t0 - start_idx
+        split_time        = ref_log.time_index[t0]
+
+        if steps_since_start % retrain_stride == 0:
+            train_series = [ts.drop_after(split_time) for ts in target_log_list]
+            if is_local:
+                _local_builder = builder_fn
+            else:
+                model = builder_fn()
+                fit_kwargs = {"series": train_series}
+                if past_for_fit is not None and model.supports_past_covariates:
+                    fit_kwargs["past_covariates"] = past_for_fit
+                if fut_for_fit is not None and model.supports_future_covariates:
+                    fit_kwargs["future_covariates"] = fut_for_fit
+                model.fit(**fit_kwargs)
+            n_retrains += 1
+            if verbose:
+                print(f"   retrain {n_retrains}  (data up to {split_time.date()})")
+
+        pred_series = [ts.drop_after(split_time) for ts in target_log_list]
 
         if is_local:
             # ARIMA per region, fit on log-transformed series with d=1.
             log_preds = []
-            for ts in train_series:
-                m = builder_fn()
+            for ts in pred_series:
+                m = _local_builder()
                 m.fit(ts)
                 log_preds.append(m.predict(n=horizon))
         else:
-            model = builder_fn()
-            fit_kwargs  = {"series": train_series}
-            pred_kwargs = {"n": horizon, "series": train_series}
+            pred_kwargs = {"n": horizon, "series": pred_series}
             if past_for_fit is not None and model.supports_past_covariates:
-                fit_kwargs["past_covariates"]  = past_for_fit
                 pred_kwargs["past_covariates"] = past_for_fit
             if fut_for_fit is not None and model.supports_future_covariates:
-                fit_kwargs["future_covariates"]  = fut_for_fit
                 pred_kwargs["future_covariates"] = fut_for_fit
-            model.fit(**fit_kwargs)
             log_preds = model.predict(show_warnings=False, **pred_kwargs)
 
         # Invert each region's prediction back to level space (element-wise).
@@ -767,14 +779,79 @@ def run_expanding_cv(
 
         for r_idx, p in enumerate(level_preds):
             all_fold_preds[r_idx].append(p)
-        n_folds += 1
-        if verbose and (n_folds == 1 or n_folds % 4 == 0):
-            print(f"   fold {n_folds} done  (trained up to {split_time.date()})")
+        n_preds += 1
 
     if verbose:
-        print(f"   {n_folds} folds complete")
+        print(f"   {n_preds} predictions, {n_retrains} retrains complete")
     return all_fold_preds
 
+
+def run_expanding_cv_iter(
+    builder_fn,
+    target_log_list,
+    start_frac,
+    *,
+    is_local=False,
+    is_neural=False,
+    horizon=OUTPUT_CHUNK_LEN,
+    stride=CV_STRIDE,
+    retrain_stride=OUTPUT_CHUNK_LEN,
+    past_covs=None,
+    future_covs=None,
+    verbose=False,
+):
+    """Generator twin of run_expanding_cv — yields cumulative fold preds after
+    each prediction step so Optuna's MedianPruner can fire."""
+    ref_log   = target_log_list[0]
+    n_total   = len(ref_log)
+    start_idx = int(start_frac * n_total)
+    n_regions = len(target_log_list)
+    all_fold_preds = [[] for _ in range(n_regions)]
+    model      = None
+    _local_builder = None
+
+    past_for_fit, fut_for_fit = _maybe_scale_covs(
+        past_covs, future_covs, do_scale=is_neural,
+    )
+
+    for t0 in range(start_idx, n_total - horizon + 1, stride):
+        steps_since_start = t0 - start_idx
+        split_time        = ref_log.time_index[t0]
+
+        if steps_since_start % retrain_stride == 0:
+            train_series = [ts.drop_after(split_time) for ts in target_log_list]
+            if is_local:
+                _local_builder = builder_fn
+            else:
+                model = builder_fn()
+                fit_kwargs = {"series": train_series}
+                if past_for_fit is not None and model.supports_past_covariates:
+                    fit_kwargs["past_covariates"] = past_for_fit
+                if fut_for_fit is not None and model.supports_future_covariates:
+                    fit_kwargs["future_covariates"] = fut_for_fit
+                model.fit(**fit_kwargs)
+
+        pred_series = [ts.drop_after(split_time) for ts in target_log_list]
+
+        if is_local:
+            log_preds = []
+            for ts in pred_series:
+                m = _local_builder()
+                m.fit(ts)
+                log_preds.append(m.predict(n=horizon))
+        else:
+            pred_kwargs = {"n": horizon, "series": pred_series}
+            if past_for_fit is not None and model.supports_past_covariates:
+                pred_kwargs["past_covariates"] = past_for_fit
+            if fut_for_fit is not None and model.supports_future_covariates:
+                pred_kwargs["future_covariates"] = fut_for_fit
+            log_preds = model.predict(show_warnings=False, **pred_kwargs)
+
+        level_preds = [_log_to_level(lp) for lp in log_preds]
+        for r_idx, p in enumerate(level_preds):
+            all_fold_preds[r_idx].append(p)
+
+        yield [list(rp) for rp in all_fold_preds]
 
 def run_final_test_log(
     builder_fn,
@@ -858,59 +935,64 @@ def run_final_test_log(
     return all_fold_preds
 
 
-def run_expanding_cv_iter(
-    builder_fn,
-    target_log_list,
-    start_frac,
-    *,
-    is_local=False,
-    is_neural=False,
-    horizon=OUTPUT_CHUNK_LEN,
-    stride=CV_STRIDE,
-    past_covs=None,
-    future_covs=None,
-    verbose=False,
+# In[ ]:
+
+
+from collections import defaultdict
+
+
+def run_final_test_log_per_activity(
+    builder_fn, target_log_list, region_names, regions_activity, start_frac, *,
+    horizon=OUTPUT_CHUNK_LEN, predict_stride=1, retrain_stride,
+    past_covs=None, future_covs=None, is_local=False, is_neural=False, verbose=True,
 ):
-    """Generator twin of run_expanding_cv — yields cumulative fold preds after
-    each fold so Optuna's MedianPruner can fire."""
-    ref_log   = target_log_list[0]
-    n_total   = len(ref_log)
-    start_idx = int(start_frac * n_total)
-    n_regions = len(target_log_list)
-    all_fold_preds = [[] for _ in range(n_regions)]
+    """Train one model per activity-level group in log space; return level-space preds."""
+    groups = defaultdict(list)
+    for i, region in enumerate(region_names):
+        groups[regions_activity[region]].append(i)
+    all_fold_preds = [None] * len(target_log_list)
+    for level in sorted(groups):
+        indices = groups[level]
+        if verbose:
+            print(f"\n--- Activity level {level} ({len(indices)} regions) ---")
+        group_log  = [target_log_list[i] for i in indices]
+        group_past = [past_covs[i]   for i in indices] if past_covs   is not None else None
+        group_fut  = [future_covs[i] for i in indices] if future_covs is not None else None
+        group_preds = run_final_test_log(
+            builder_fn, group_log, start_frac,
+            predict_stride=predict_stride, retrain_stride=retrain_stride,
+            horizon=horizon, past_covs=group_past, future_covs=group_fut,
+            is_local=is_local, is_neural=is_neural, verbose=verbose,
+        )
+        for group_idx, orig_idx in enumerate(indices):
+            all_fold_preds[orig_idx] = group_preds[group_idx]
+    return all_fold_preds
 
-    past_for_fit, fut_for_fit = _maybe_scale_covs(
-        past_covs, future_covs, do_scale=is_neural,
-    )
 
-    for t0 in range(start_idx, n_total - horizon + 1, stride):
-        split_time   = ref_log.time_index[t0]
-        train_series = [ts.drop_after(split_time) for ts in target_log_list]
-
-        if is_local:
-            log_preds = []
-            for ts in train_series:
-                m = builder_fn()
-                m.fit(ts)
-                log_preds.append(m.predict(n=horizon))
-        else:
-            model = builder_fn()
-            fit_kwargs  = {"series": train_series}
-            pred_kwargs = {"n": horizon, "series": train_series}
-            if past_for_fit is not None and model.supports_past_covariates:
-                fit_kwargs["past_covariates"]  = past_for_fit
-                pred_kwargs["past_covariates"] = past_for_fit
-            if fut_for_fit is not None and model.supports_future_covariates:
-                fit_kwargs["future_covariates"]  = fut_for_fit
-                pred_kwargs["future_covariates"] = fut_for_fit
-            model.fit(**fit_kwargs)
-            log_preds = model.predict(show_warnings=False, **pred_kwargs)
-
-        level_preds = [_log_to_level(lp) for lp in log_preds]
-        for r_idx, p in enumerate(level_preds):
-            all_fold_preds[r_idx].append(p)
-
-        yield [list(rp) for rp in all_fold_preds]
+def run_final_test_log_per_region(
+    builder_fn, target_log_list, start_frac, *,
+    horizon=OUTPUT_CHUNK_LEN, predict_stride=1, retrain_stride,
+    past_covs=None, future_covs=None, is_neural=False, verbose=True,
+):
+    """Train one model per region in log space; return level-space preds."""
+    all_fold_preds = []
+    for i in range(len(target_log_list)):
+        if verbose:
+            print(f"\n--- Region {i + 1}/{len(target_log_list)} ---")
+        region_preds = run_final_test_log(
+            builder_fn,
+            [target_log_list[i]],
+            start_frac,
+            predict_stride=predict_stride,
+            retrain_stride=retrain_stride,
+            horizon=horizon,
+            past_covs=[past_covs[i]]    if past_covs   is not None else None,
+            future_covs=[future_covs[i]] if future_covs is not None else None,
+            is_neural=is_neural,
+            verbose=verbose,
+        )
+        all_fold_preds.append(region_preds[0])
+    return all_fold_preds
 
 
 # In[ ]:
@@ -1019,9 +1101,9 @@ def _suggest_lstm_params(trial, input_chunk_length: int, model_type: str = "LSTM
             "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True),
         },
         random_state        = RANDOM_STATE,
-        add_encoders        =                 "cyclic": {
+                        add_encoders        =                 {"cyclic": {
                     "past": ["month", "week", "dayofyear", "dayofweek", "day"]
-                           },
+                           }},
         pl_trainer_kwargs   = _nn_trainer_kwargs(trial),
     )
 
@@ -1191,11 +1273,9 @@ def _build_lstm_from_best(variant: str, best: dict):
         n_epochs            = 100,
         optimizer_kwargs    = {"lr": b["lr"], "weight_decay": b["weight_decay"]},
         random_state        = RANDOM_STATE,
-       add_encoders = {
-                "cyclic": {
+                        add_encoders        =                 {"cyclic": {
                     "past": ["month", "week", "dayofyear", "dayofweek", "day"]
-                           },
-                },
+                           }},
         pl_trainer_kwargs   = _nn_trainer_kwargs(),
     )
     return lambda: build_lstm_from_params(params)
@@ -1438,4 +1518,170 @@ test_leaderboard = (
       .reset_index(drop=True)
 )
 print(test_leaderboard)
+
+
+# ## Per-activity-level and per-region model comparison
+# 
+# Each tuned variant is re-run in two additional training paradigms:
+# 
+# - **Activity-level model**: one model per conflict-intensity group (low / medium / high), trained in log space on the homogeneous subset of regions it owns.
+# - **Local model**: one model per region (20 independent models), trained in log space on its own series and covariates.
+# 
+# Both use `predict_stride=1` / `retrain_stride=OUTPUT_CHUNK_LEN`.
+# Results are compared against the global model in a leaderboard at the end of this section.
+
+# In[ ]:
+
+
+activity_cv_long_by_model = {}
+local_cv_long_by_model    = {}
+
+for variant, best_params in best_params_by_variant.items():
+    name = f"{variant}_tuned"
+    if variant in NN_VARIANTS:
+        builder     = _build_lstm_from_best(variant, best_params)
+        is_neural   = True
+        chosen_past = full_raw_past_covs_LSTM
+    else:
+        builder     = lambda p=best_params, v=variant: build_gbm_from_params(v, p)
+        is_neural   = False
+        chosen_past = full_past_covs
+
+    print(f"\n=== Activity-level CV: {name} ===")
+    fp = run_final_test_log_per_activity(
+        builder, target_for_cv_log, region_names, regions_activity, CV_START_VAL,
+        predict_stride=1, retrain_stride=OUTPUT_CHUNK_LEN,
+        past_covs=chosen_past, future_covs=full_fut_covs, is_neural=is_neural,
+    )
+    activity_cv_long_by_model[name] = collect_predictions_long(target_for_cv, fp, region_names)
+
+    print(f"\n=== Local (per-region) CV: {name} ===")
+    fp = run_final_test_log_per_region(
+        builder, target_for_cv_log, CV_START_VAL,
+        predict_stride=1, retrain_stride=OUTPUT_CHUNK_LEN,
+        past_covs=chosen_past, future_covs=full_fut_covs, is_neural=is_neural,
+    )
+    local_cv_long_by_model[name] = collect_predictions_long(target_for_cv, fp, region_names)
+
+
+# In[ ]:
+
+
+activity_test_long_by_model = {}
+local_test_long_by_model    = {}
+
+for variant, best_params in best_params_by_variant.items():
+    name = f"{variant}_tuned"
+    if variant in NN_VARIANTS:
+        builder     = _build_lstm_from_best(variant, best_params)
+        is_neural   = True
+        chosen_past = full_raw_past_covs_LSTM
+    else:
+        builder     = lambda p=best_params, v=variant: build_gbm_from_params(v, p)
+        is_neural   = False
+        chosen_past = full_past_covs
+
+    print(f"\n=== Activity-level test: {name} ===")
+    fp = run_final_test_log_per_activity(
+        builder, target_full_log, region_names, regions_activity, TEST_START_FRAC,
+        predict_stride=1, retrain_stride=OUTPUT_CHUNK_LEN,
+        past_covs=chosen_past, future_covs=full_fut_covs, is_neural=is_neural,
+    )
+    activity_test_long_by_model[name] = collect_predictions_long(target_full, fp, region_names)
+
+    print(f"\n=== Local (per-region) test: {name} ===")
+    fp = run_final_test_log_per_region(
+        builder, target_full_log, TEST_START_FRAC,
+        predict_stride=1, retrain_stride=OUTPUT_CHUNK_LEN,
+        past_covs=chosen_past, future_covs=full_fut_covs, is_neural=is_neural,
+    )
+    local_test_long_by_model[name] = collect_predictions_long(target_full, fp, region_names)
+
+
+# In[ ]:
+
+
+import pandas as pd
+
+# CV leaderboard
+lb_rows = []
+for name, long_df in long_by_model.items():
+    res = evaluate_long(long_df, MAE_SCALES, RMSE_SCALES, regions_activity)
+    lb_rows.append({"model": name, "paradigm": "global",   **res["global"]})
+
+for name, long_df in activity_cv_long_by_model.items():
+    res = evaluate_long(long_df, MAE_SCALES, RMSE_SCALES, regions_activity)
+    lb_rows.append({"model": name, "paradigm": "activity", **res["global"]})
+
+for name, long_df in local_cv_long_by_model.items():
+    res = evaluate_long(long_df, MAE_SCALES, RMSE_SCALES, regions_activity)
+    lb_rows.append({"model": name, "paradigm": "local",    **res["global"]})
+
+cv_leaderboard = pd.DataFrame(lb_rows).sort_values("MASE_mean").reset_index(drop=True)
+print("=== CV leaderboard (global vs activity-level vs local) ===")
+print(cv_leaderboard)
+
+# Test leaderboard
+lb_test_rows = []
+for name, long_df in test_long_by_model.items():
+    res = evaluate_long(long_df, MAE_SCALES, RMSE_SCALES, regions_activity)
+    lb_test_rows.append({"model": name, "paradigm": "global",   **res["global"]})
+
+for name, long_df in activity_test_long_by_model.items():
+    res = evaluate_long(long_df, MAE_SCALES, RMSE_SCALES, regions_activity)
+    lb_test_rows.append({"model": name, "paradigm": "activity", **res["global"]})
+
+for name, long_df in local_test_long_by_model.items():
+    res = evaluate_long(long_df, MAE_SCALES, RMSE_SCALES, regions_activity)
+    lb_test_rows.append({"model": name, "paradigm": "local",    **res["global"]})
+
+test_leaderboard_paradigms = pd.DataFrame(lb_test_rows).sort_values("MASE_mean").reset_index(drop=True)
+print("\n=== Test leaderboard (global vs activity-level vs local) ===")
+print(test_leaderboard_paradigms)
+
+
+# In[ ]:
+
+
+# ── Persist all results ───────────────────────────────────────────────────────
+import json
+from pathlib import Path
+
+RESULTS_DIR = Path("results/log")
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _safe(name):
+    return name.replace("/", "_").replace(" ", "_")
+
+def _save_group(long_dict, split, paradigm):
+    rows = []
+    for name, long_df in long_dict.items():
+        key = f"{split}_{paradigm}_{_safe(name)}"
+        res = evaluate_long(long_df, MAE_SCALES, RMSE_SCALES, regions_activity)
+        long_df.to_parquet(RESULTS_DIR / f"predictions_long_{key}.parquet", index=False)
+        res["per_region"].to_csv(         RESULTS_DIR / f"per_region_{key}.csv",         index=False)
+        res["per_horizon"].to_csv(        RESULTS_DIR / f"per_horizon_{key}.csv",        index=False)
+        res["per_region_horizon"].to_csv( RESULTS_DIR / f"per_region_horizon_{key}.csv", index=False)
+        with open(RESULTS_DIR / f"global_{key}.json", "w") as fh:
+            json.dump(res["global"], fh, indent=2, default=float)
+        for view in ("per_activity_level", "per_activity_horizon"):
+            if view in res:
+                res[view].to_csv(RESULTS_DIR / f"{view}_{key}.csv", index=False)
+        rows.append({"split": split, "paradigm": paradigm, "model": name, **res["global"]})
+        print(f"  saved: {split}/{paradigm}/{name}")
+    return rows
+
+lb_rows = []
+lb_rows += _save_group(long_by_model,                                      "cv",   "global")
+lb_rows += _save_group(activity_cv_long_by_model,                          "cv",   "activity")
+lb_rows += _save_group(globals().get("local_cv_long_by_model",   {}),      "cv",   "local")
+lb_rows += _save_group(test_long_by_model,                                 "test", "global")
+lb_rows += _save_group(activity_test_long_by_model,                        "test", "activity")
+lb_rows += _save_group(globals().get("local_test_long_by_model", {}),      "test", "local")
+
+pd.DataFrame(lb_rows).sort_values(["split", "MASE_mean"]).reset_index(drop=True).to_csv(
+    RESULTS_DIR / "leaderboard.csv", index=False
+)
+print(f"\nAll results in: {RESULTS_DIR.resolve()}")
+print(sorted(p.name for p in RESULTS_DIR.iterdir()))
 

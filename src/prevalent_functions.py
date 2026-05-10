@@ -122,6 +122,87 @@ def get_engineered_features(
         
     return for_global_reset, global_weather_columns
 
+def get_engineered_features_damageclassifiers(
+        master_timeseries,
+        data_path,
+        targets_cols,
+        regions, 
+        regions_activity,
+):
+    # Identify weather columns
+    locale_env_weather_columns = [
+        c for c in master_timeseries.columns
+        if "env" in c and "holiday" not in c
+    ]
+
+    global_weather_columns = list(set(
+        "_".join(c.split("_")[:-1]) if c != "env_k_max" else c
+        for c in locale_env_weather_columns
+    ))
+
+    # add total strikes on day x
+    master_timeseries['act_total_daily_strike_events'] = master_timeseries[[x for x in master_timeseries.columns.tolist() if 'act_drone_strike_on_ua' in x]].sum(axis=1)
+    # add total damage events regardless of intention and target
+    master_timeseries['act_total_damage_events'] = master_timeseries[[x for x in master_timeseries.columns.tolist() if 'act_drone_infra_ua' in x]].sum(axis=1)
+
+    # Long hierarchical
+    for_global = get_pivoted_table(df=master_timeseries.reset_index(), regions=regions)
+
+    # Drop low-activity regions
+    for_global["Activity_Level"] = for_global.index.get_level_values("region").map(regions_activity)
+    for_global = for_global[for_global["Activity_Level"] != 0]
+
+    # Drop low-prevalence ACLED "other" categories
+    for_global, _removed = remove_low_prevalence(df=for_global, ratio=0.1, specific="acled_other_")
+
+
+    
+    # Ratio / Interaction features
+    if "acled_other_ua_armed_clash" in for_global.columns and "acled_other_rus_armed_clash" in for_global.columns:
+        for_global["ratio_ua_rus_armed_clash"] = (
+            for_global["acled_other_ua_armed_clash"] / (for_global["acled_other_rus_armed_clash"] + 1)
+        )
+
+    dist_cols = get_all_X("dist_to_nearest_ru_km", for_global)
+    if dist_cols and "acled_other_rus_armed_clash" in for_global.columns:
+        for_global["dist_x_clash"] = (
+            for_global[dist_cols[0]] * for_global["acled_other_rus_armed_clash"]
+        )
+
+    # Aggregate GDELT primary/secondary
+    gdelt_cols = (
+        set(get_all_X("com_", for_global))
+        - set(get_all_X("com_ners", for_global))
+        - set(get_all_X("com_aid",  for_global))
+    )
+    actors = load_actors_dict(construct_path(data_path, "actors.json"))
+    for_global = aggregate_gdelt_primary_secondary(df=for_global, columns=gdelt_cols, actors=actors)
+
+    # Fix na in infra
+    infra_cols = get_all_X("act_drone_infra_ua_",for_global)
+    for_global[infra_cols] = for_global[infra_cols].fillna(0)
+
+    to_return_df = []
+
+    #------------------
+    for target in targets_cols:
+        copied_df = for_global.copy()
+        print(target)
+        # print(get_all_X("act_drone_infra_ua_",copied_df))
+        copied_df = to_binary_classification(copied_df, target)
+        copied_df.drop(columns=[target], inplace=True)
+        print(f"Amount of target =1: {copied_df[f"{target}_binary"].sum():.3f}")
+        print(f"Total rows: {copied_df[f"{target}_binary"].count():.3f}")
+        print(f"Target positive rate: {copied_df[f"{target}_binary"].mean():.3f}")
+        # Label prints differently depending on the task
+        copied_df_reset = copied_df.reset_index()
+        if "index" in copied_df_reset.columns:
+            copied_df_reset = copied_df_reset.drop(columns=["index"])
+        to_return_df.append(copied_df_reset)
+
+    return to_return_df, global_weather_columns
+
+
 def split_future_and_past_cov(for_global_reset,global_weather_columns,target, exclude=None):
     holiday_cols      = get_all_X("holiday", for_global_reset)
     future_covariates = holiday_cols + global_weather_columns
