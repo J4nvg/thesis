@@ -441,6 +441,9 @@ def run_final_test(
                 pred_kwargs["future_covariates"] = fut_for_fit
             preds = model.predict(**pred_kwargs)
 
+            if getattr(model, "_count_log_link", False):                     # ← add
+                preds = [p.map(np.exp) for p in preds] 
+
         for r_idx, pred in enumerate(preds):
             all_fold_preds[r_idx].append(pred)
         n_preds += 1

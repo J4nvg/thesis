@@ -290,8 +290,11 @@ def compute_naive_scales_from_tsdf(train_tsdf, target_col, seasonality=7):
     return mae_s, rmse_s
 
 
+train_only_size = int(TRAIN_FRAC * n)
+train_only_data, _ = tsdf.train_test_split(prediction_length=n - train_only_size)
+
 MAE_SCALES, RMSE_SCALES = compute_naive_scales_from_tsdf(
-    train_data, TARGET, seasonality=NAIVE_SEASONALITY,
+    train_only_data, TARGET, seasonality=NAIVE_SEASONALITY,
 )
 print(f"Computed naive (lag={NAIVE_SEASONALITY}) scales for {len(MAE_SCALES)} regions")
 
@@ -516,11 +519,13 @@ else:
         enable_ensemble=False,
         num_val_windows=NUM_VAL_WINDOWS,
         random_seed=RANDOM_STATE,
-        # skip_model_selection=True,
     )
 
 print("\n--- Zero-shot internal leaderboard (val MASE = -score_val) ---")
 print(predictor_zs.leaderboard())
+zs_ft = predictor_zs.feature_importance(test_data_ag, model="Chronos2ZeroShot", relative_scores=True)
+print(zs_ft)
+zs_ft.to_csv(RESULTS_DIR / "feature_importance_chronos2_zs.csv")
 
 
 # ## 8. Hyperparameter tuning (Optuna)
@@ -637,31 +642,31 @@ print(trials_df.head(20))
 # In[ ]:
 
 
-# Wipe any previous best (safe — only this directory)
 if BEST_PREDICTOR_DIR.exists():
-    shutil.rmtree(BEST_PREDICTOR_DIR)
-
-predictor_ft = TimeSeriesPredictor(
-    prediction_length=OUTPUT_CHUNK_LEN,
-    target=TARGET,
-    known_covariates_names=future_covariates,
-    eval_metric="MASE",
-    freq="D",
-    path=str(BEST_PREDICTOR_DIR),
-).fit(
-    train_data=train_data,
-    hyperparameters={
-        "Chronos2": {
-            "fine_tune":       True,
-            "fine_tune_lr":    best_params["fine_tune_lr"],
-            "fine_tune_steps": best_params["fine_tune_steps"],
-            "ag_args": {"name_suffix": "FT_best"},
-        }
-    },
-    enable_ensemble=False,
-    num_val_windows=NUM_VAL_WINDOWS,
-    random_seed=RANDOM_STATE,
-)
+    print(f"Loading cached fine-tuned predictor from {BEST_PREDICTOR_DIR}")
+    predictor_ft = TimeSeriesPredictor.load(str(BEST_PREDICTOR_DIR))
+else:
+    predictor_ft = TimeSeriesPredictor(
+        prediction_length=OUTPUT_CHUNK_LEN,
+        target=TARGET,
+        known_covariates_names=future_covariates,
+        eval_metric="MASE",
+        freq="D",
+        path=str(BEST_PREDICTOR_DIR),
+    ).fit(
+        train_data=train_data,
+        hyperparameters={
+            "Chronos2": {
+                "fine_tune":       True,
+                "fine_tune_lr":    best_params["fine_tune_lr"],
+                "fine_tune_steps": best_params["fine_tune_steps"],
+                "ag_args": {"name_suffix": "FT_best"},
+            }
+        },
+        enable_ensemble=False,
+        num_val_windows=NUM_VAL_WINDOWS,
+        random_seed=RANDOM_STATE,
+    )
 
 # Persist a json sidecar with the winning config + provenance
 with open(BEST_PREDICTOR_DIR / "best_params.json", "w") as f:
@@ -678,7 +683,9 @@ with open(BEST_PREDICTOR_DIR / "best_params.json", "w") as f:
 
 print(f"\nBest predictor saved to: {BEST_PREDICTOR_DIR.resolve()}")
 print(predictor_ft.leaderboard())
-
+fi_ft = predictor_ft.feature_importance(test_data_ag, model="Chronos2FT_best", relative_scores=True)
+print(fi_ft)
+fi_ft.to_csv(RESULTS_DIR / "feature_importance_chronos2_ft.csv")
 
 # ## 10. Test-set rolling backtest
 # 
@@ -692,7 +699,7 @@ print(predictor_ft.leaderboard())
 
 # Index into the full series where the test segment begins
 n_full        = int(tsdf.num_timesteps_per_item().min())
-test_start_ix = n_full - test_size   # first index in the test segment
+test_start_ix = int((TRAIN_FRAC + VAL_FRAC) * n_full)   # matches int(0.80 * n) used in other notebooks
 
 print(f"Test starts at timestep {test_start_ix} / {n_full}")
 print(f"Number of test folds (stride={CV_STRIDE}): "

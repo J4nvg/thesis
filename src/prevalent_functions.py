@@ -110,6 +110,12 @@ def get_engineered_features(
 
     print(f"Shape after feature engineering: {for_global.shape}")
     
+    if target_col not in for_global.columns:
+        raise ValueError(
+            f"target_col={target_col!r} not found after feature engineering. "
+            f"Available columns (first 20): {sorted(for_global.columns.tolist())[:20]}"
+        )
+
     # Label prints differently depending on the task
     if binarize_target:
         print(f"Target positive rate: {for_global[target_col].mean():.3f}")
@@ -227,7 +233,6 @@ def get_common_kwargs(input_lags=7,output_chunk_len=7):
     lags_past_covariates    = [-1,-7,-14],
     lags_future_covariates  = (2, output_chunk_len),
     output_chunk_length     = output_chunk_len,
-    multi_models            = True,
     output_chunk_shift      = 0,
     add_encoders            = {
         "cyclic": {

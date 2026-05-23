@@ -95,6 +95,7 @@ from darts import TimeSeries
 from darts.dataprocessing.transformers import (
     WindowTransformer, StaticCovariatesTransformer, Scaler, Diff,
 )
+from darts.models import NaiveMean
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -147,6 +148,8 @@ RANDOM_STATE = 42
 np.random.seed(RANDOM_STATE)
 import torch
 torch.manual_seed(RANDOM_STATE)
+if torch.cuda.is_available():
+    torch.set_float32_matmul_precision("high")
 
 
 # ## 1. Load data
@@ -307,6 +310,7 @@ def build_regressor(name: str):
         from darts.models import LightGBMModel
         return LightGBMModel(
             **COMMON_KWARGS_TAB,
+            multi_models      = True,
             objective         = "regression",         # MSE
             num_leaves        = 31,
             max_depth         = 5,
@@ -329,6 +333,7 @@ def build_regressor(name: str):
         from darts.models import XGBModel
         return XGBModel(
             **COMMON_KWARGS_TAB,
+            multi_models      = True,
             objective         = "reg:squarederror",   # MSE
             max_depth         = 5,
             min_child_weight  = 3,
@@ -350,6 +355,7 @@ def build_regressor(name: str):
         from darts.models import CatBoostModel
         return CatBoostModel(
             **COMMON_KWARGS_TAB,
+            multi_models      = True,
             loss_function     = "RMSE",
             depth             = 5,
             learning_rate     = 0.05,
@@ -369,6 +375,7 @@ def build_regressor(name: str):
         from darts.models import LinearRegressionModel
         return LinearRegressionModel(
             **COMMON_KWARGS_TAB,
+            multi_models = True,
         )
 
     # ---------------- LSTM with default MSE loss ---------------------------
@@ -400,7 +407,7 @@ def build_regressor(name: str):
             p = 7,
             d = 0,
             q = 1,
-            random_state = RANDOM_STATE,
+            random_state = RANDOM_STATE,    
         )
 
     if name in NAIVE_MODELS:
@@ -423,6 +430,7 @@ def build_gbm_from_params(variant: str, params: dict):
         from darts.models import LightGBMModel
         return LightGBMModel(
             **COMMON_KWARGS_TAB,
+            multi_models   = True,
             objective      = "regression",
             random_state   = RANDOM_STATE,
             verbose        = -1,
@@ -437,6 +445,7 @@ def build_gbm_from_params(variant: str, params: dict):
         from darts.models import XGBModel
         return XGBModel(
             **COMMON_KWARGS_TAB,
+            multi_models = True,
             objective    = "reg:squarederror",
             tree_method  = "hist",
             device       = "cuda",
@@ -451,6 +460,7 @@ def build_gbm_from_params(variant: str, params: dict):
         from darts.models import CatBoostModel
         return CatBoostModel(
             **COMMON_KWARGS_TAB,
+            multi_models       = True,
             loss_function      = "RMSE",
             boost_from_average = False,
             bootstrap_type     = "Bernoulli",
@@ -745,9 +755,15 @@ def run_expanding_cv(
             # ARIMA per region, fit on diffed series with d=0.
             diff_preds = []
             for ts in pred_series:
-                m = _local_builder()
-                m.fit(ts)
-                diff_preds.append(m.predict(n=horizon))
+                try:
+                    m = _local_builder()
+                    m.fit(ts)
+                    pred = m.predict(n=horizon)
+                except Exception:
+                    fallback = NaiveMean()
+                    fallback.fit(ts)
+                    pred = fallback.predict(n=horizon)
+                diff_preds.append(pred)
         else:
             pred_kwargs = {"n": horizon, "series": pred_series}
             if past_for_fit is not None and model.supports_past_covariates:
@@ -822,9 +838,15 @@ def run_expanding_cv_iter(
         if is_local:
             diff_preds = []
             for ts in pred_series:
-                m = _local_builder()
-                m.fit(ts)
-                diff_preds.append(m.predict(n=horizon))
+                try:
+                    m = _local_builder()
+                    m.fit(ts)
+                    pred = m.predict(n=horizon)
+                except Exception:
+                    fallback = NaiveMean()
+                    fallback.fit(ts)
+                    pred = fallback.predict(n=horizon)
+                diff_preds.append(pred)
         else:
             pred_kwargs = {"n": horizon, "series": pred_series}
             if past_for_fit is not None and model.supports_past_covariates:
@@ -904,9 +926,15 @@ def run_final_test_diff(
         if is_local:
             diff_preds = []
             for ts in pred_series:
-                m = _local_builder()
-                m.fit(ts)
-                diff_preds.append(m.predict(n=horizon))
+                try:
+                    m = _local_builder()
+                    m.fit(ts)
+                    pred = m.predict(n=horizon)
+                except Exception:
+                    fallback = NaiveMean()
+                    fallback.fit(ts)
+                    pred = fallback.predict(n=horizon)
+                diff_preds.append(pred)
         else:
             pred_kwargs = {"n": horizon, "series": pred_series, "show_warnings": False}
             if past_for_fit is not None and model.supports_past_covariates:
