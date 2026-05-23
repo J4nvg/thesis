@@ -8,7 +8,7 @@ This repository contains the code, models, and results for my Bachelor's thesis 
 **Jan van Gestel**
 
 ## Overview
-This project evaluates the extent to which machine learning and deep learning algorithms can produce multi-horizon spatiotemporal forecasts of drone-strike events across Ukrainian regions. It compares various predictive models including gradient boosting trees (XGBoost, LightGBM, CatBoost), LSTMs, and foundational time-series models like Chronos. 
+This project evaluates the extent to which machine learning and deep learning algorithms can produce multi-horizon spatiotemporal forecasts of drone-strike events across Ukrainian regions. It compares various predictive models including gradient boosting trees (XGBoost, LightGBM, CatBoost), LSTMs, and foundational time-series model Chronos-2. 
 
 ## Repository Structure
 * **Notebooks (`*.ipynb`)**: Jupyter notebooks containing the training, evaluation, and hurdle models (e.g., `_chronos2.ipynb`, `_regression_GBDT.ipynb`, `damage_classifier.ipynb`).
