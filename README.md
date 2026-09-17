@@ -24,3 +24,16 @@ Notebooks were converted to .py files before ran on a cluster using:
 $ jupyter nbconvert --to script [NB].ipynb
 
 ```
+
+## Repository status (September 2026)
+
+This code base is being refactored into the `strikecast` package. The plan, scope, and open questions
+live in [`docs/REFACTOR_PLAN.md`](docs/REFACTOR_PLAN.md).
+
+* `archive/` holds the log-transformed regression experiment and pre-refactor leftovers. These are not
+  reported in the thesis and are kept read-only.
+* `golden/` (git-ignored) holds a frozen copy of the thesis results, checkpoints, and features, used as
+  the reference for regression checks against refactored code.
+* `envs/autogluon/` is a standalone uv environment for the Chronos-2 experiment (`_chronos2.py`):
+  AutoGluon 1.5.0 caps `pandas<2.4` and cannot coexist with the main pandas 3.0.2 pin. Sync it with
+  `uv sync --project envs/autogluon` and run `uv run --project envs/autogluon python _chronos2.py`.

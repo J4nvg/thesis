@@ -1,0 +1,46 @@
+# ---------------------------------------------------------------------------
+# Separate environment for the Chronos-2 experiment (`_chronos2.py`).
+#
+# WHY: AutoGluon 1.5.0 caps pandas<2.4 / numpy<2.4 / scipy<1.17, which is
+# unsatisfiable together with the main project's frozen core (pandas 3.0.2,
+# numpy 2.4.4, scipy 1.17.1). Forcing it in there installs but fails at import
+# with `ImportError: cannot import name 'ArrayManager' from
+# pandas.core.internals` (removed in pandas 3.0). See the comment block at the
+# top of ../../pyproject.toml. This env is therefore standalone and is NOT part
+# of the main uv workspace.
+#
+# Deviations from the historical pins (git show bcf16c8:requirements.txt) and
+# from the main project's pins are documented in README.md next to this file.
+# ---------------------------------------------------------------------------
+
+[project]
+name = "strikecast-autogluon"
+version = "0.1.0"
+description = "Isolated AutoGluon/Chronos-2 environment for _chronos2.py"
+readme = "README.md"
+# autogluon.timeseries 1.5.0 metadata: Requires-Python >=3.10,<3.14
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+  # --- the reason this env exists ---
+  "autogluon.timeseries==1.5.0",
+  # --- core scientific stack (capped by autogluon 1.5.0) ---
+  "numpy>=2.2,<2.4",          # autogluon: <2.4.0 ; darts 0.43.0: >=2.2.0
+  "pandas>=2.2,<2.4",         # autogluon: <2.4.0 ; darts 0.43.0: >=2.2.0
+  "scipy<1.17",               # autogluon: <1.17
+  "pyarrow<21",               # autogluon-common: <21
+  "matplotlib==3.10.9",
+  "statsmodels==0.14.6",
+  "scikit-learn==1.6.0",
+  # --- legacy helper package `src` (repo root) needs darts + sklearn + mpl ---
+  "darts[torch]==0.43.0",
+  # --- DL / tuning (same pins as the main project) ---
+  "torch==2.9.1",             # autogluon: >=2.6,<2.10 -> 2.9.1 allowed
+  "pytorch-lightning==2.5.2", # darts[torch]: <2.5.3 ; autogluon lightning: <2.6
+  "optuna==4.8.0",
+  "optuna-integration==4.8.0",
+  "tqdm==4.67.3",
+]
+
+[tool.uv]
+package = false

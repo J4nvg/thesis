@@ -1,0 +1,135 @@
+# ---------------------------------------------------------------------------
+# Deviations from the historical pins (git show bcf16c8:requirements.txt)
+# ---------------------------------------------------------------------------
+# - comet-ml==3.57.3            : DROPPED on purpose (experiment tracking moved
+#                                 to Weights & Biases).
+# - imbalanced-ensemble         : was `-e file:///home/jan/thesispatch/...`
+#                                 (a local patched checkout). Now pinned as a
+#                                 git dependency to the fork/commit behind
+#                                 upstream PR #41 (sklearn>=1.6 compat).
+# - scikit-posthocs             : used by the analysis notebooks but never
+#                                 pinned historically; left unpinned/floating.
+# - transitive pins             : the historical file was a full `pip freeze`.
+#                                 Only direct dependencies are pinned here;
+#                                 transitive versions are frozen by uv.lock.
+# - nvidia-*/triton wheels      : Linux+CUDA only. Not listed as core deps
+#                                 (they are pulled in automatically by torch on
+#                                 linux-x86_64); see the `gpu` extra.
+# - autogluon==1.5.0            : REMOVED from this project's extras. It caps
+#                                 scipy<1.17, pandas>=2.0,<2.4 and pyarrow<21,
+#                                 which is unsatisfiable together with the
+#                                 frozen core (scipy 1.17.1 / pandas 3.0.2 /
+#                                 pyarrow 24.0.0). Forcing it in with uv
+#                                 `override-dependencies` installs but then
+#                                 fails at import:
+#                                   ImportError: cannot import name
+#                                   'ArrayManager' from pandas.core.internals
+#                                 (ArrayManager was removed in pandas 3.0).
+#                                 The historical freeze listed both, so those
+#                                 autogluon runs must have used a different
+#                                 pandas. Run AutoGluon in its own venv.
+# - direct pins for every package listed above are unchanged from bcf16c8.
+#   hydra-core, wandb and scikit-posthocs are new/unpinned (no historical pin).
+# (Any further deviation forced by resolution is appended below.)
+# ---------------------------------------------------------------------------
+
+[project]
+name = "strikecast"
+version = "0.1.0"
+description = "Drone-strike forecasting: conformal/probabilistic time-series pipeline"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "Jan van Gestel", email = "g.j.h.vangestel@tilburguniversity.edu" }]
+
+dependencies = [
+  # --- core scientific stack ---
+  "numpy==2.4.4",
+  "pandas==3.0.2",
+  "scipy==1.17.1",
+  "pyarrow==24.0.0",
+  "matplotlib==3.10.9",
+  "seaborn==0.13.2",
+  "statsmodels==0.14.6",
+  "scikit-learn==1.6.0",
+  "scikit-posthocs",
+  # --- forecasting / DL ---
+  "darts==0.43.0",
+  "torch==2.9.1",
+  "lightning==2.5.6",
+  "pytorch-lightning==2.5.2",
+  # --- gradient boosting ---
+  "lightgbm==4.6.0",
+  "xgboost==3.1.3",
+  "catboost==1.2.10",
+  # --- imbalance handling ---
+  "imbalanced-learn==0.14.1",
+  "imbalanced-ensemble @ git+https://github.com/J4nvg/imbalanced-ensemble.git@dc00ca2458a864170c1020f34e0b5cc480b2f7d0",
+  # --- uncertainty / calibration ---
+  "venn-abers==1.5.3",
+  # --- tuning, config, tracking ---
+  "optuna==4.8.0",
+  "optuna-integration==4.8.0",
+  "hydra-core>=1.3,<2",
+  "omegaconf==2.3.0",
+  "pydantic==2.13.0",
+  "wandb>=0.18",
+  "tqdm==4.67.3",
+]
+
+[project.optional-dependencies]
+# NOTE: there is intentionally no `autogluon` extra -- see the deviation block
+# at the top of this file. autogluon-timeseries 1.5.0 cannot run against the
+# frozen pandas 3.0.2 core (it imports pandas.core.internals.ArrayManager,
+# removed in pandas 3). Install it in a separate environment:
+#   uv venv .venv-autogluon && uv pip install --python .venv-autogluon \
+#       "autogluon.timeseries==1.5.0"
+# CUDA-specific extras. torch's CUDA wheels are linux-x86_64 only, so the
+# marker keeps `uv sync --extra gpu` a no-op on macOS arm64 instead of failing.
+gpu = [
+  "nvidia-ml-py3==7.352.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+dev = [
+  "pytest>=8",
+  "ruff>=0.6",
+  "pyright>=1.1.380",
+  "jupyter>=1.1",
+  "nbconvert>=7.16",
+  "ipykernel>=6.29",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/strikecast"]
+
+[tool.uv]
+# torch CUDA builds come from the PyTorch index on Linux only; on macOS the
+# default PyPI wheel (CPU/MPS) is used.
+environments = [
+  "sys_platform == 'darwin'",
+  "sys_platform == 'linux'",
+]
+
+[tool.ruff]
+src = ["src", "src/strikecast"]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pyright]
+include = ["src", "src/strikecast"]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"
+reportMissingImports = "warning"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

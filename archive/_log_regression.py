@@ -1,19 +1,21 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# # Differenced regression — basic regressors only
+# # Log-transformed regression — basic regressors only
 # 
 # Companion notebook to `_regression_GBDT.ipynb` and `_regression_LSTM.ipynb`.
 # 
 # **What's different here**
-# * The target is **differenced once** (`y'_t = y_t - y_{t-1}`) before any model
-#   sees it. The diffed series is much closer to stationary, which lets the
-#   basic regressors compete on a level playing field with their plain MSE
-#   loss instead of needing count-aware likelihoods.
-# * Every model is trained on the diffed target. Predictions in diff-space
-#   are un-diffed back to levels (anchor = last actual value before the
-#   forecast window) so the leaderboard / MASE / RMSSE / etc. stay
-#   comparable to the count-based notebooks.
+# * The target is **log-transformed** (`y'_t = log(1 + y_t)`) before any model
+#   sees it. The transform is variance-stabilising and squashes the heavy right
+#   tail of the count series, which lets the basic regressors compete on a
+#   level playing field with their plain MSE loss instead of needing
+#   count-aware likelihoods.
+# * Every model is trained on the log-transformed target. Predictions in
+#   log-space are inverted back to levels element-wise via `e^{y'_hat} - 1`
+#   (no anchor needed, unlike the differencing inverse) so the
+#   leaderboard / MASE / RMSSE / etc. stay comparable to the count-based
+#   notebooks.
 # 
 # **Lineup** (all hyper-parameter tuned on the validation CV folds, except
 # linear / arima / naives which run with default configs):
@@ -21,14 +23,15 @@
 # * `xgboost`  — `objective="reg:squarederror"`
 # * `catboost` — `loss_function="RMSE"`
 # * `lstm`     — Darts `BlockRNNModel` with default MSE loss
-# * `arima`    — fed the diffed series with `d=0` (per region, no covariates)
+# * `arima`    — fed the log-transformed series with `d=1` (per region, no covariates)
 # * `linear`   — Darts `LinearRegressionModel` — no tunable knobs, included as a floor
 # * `naive_last`, `naive_weekly` — same persistence baselines as the other notebooks
 # 
 # Evaluation reuses the same expanding-window CV, naive scales (computed on
 # the **level** training series), and metric pipeline.
+# 
 
-# In[1]:
+# In[ ]:
 
 
 # from google.colab import drive
@@ -39,7 +42,7 @@ PROJECT_DIR = './'
 # %cd $PROJECT_DIR
 
 
-# In[2]:
+# In[ ]:
 
 
 # !nvidia-smi
@@ -48,16 +51,10 @@ PROJECT_DIR = './'
 # In[ ]:
 
 
-
-
-
-# In[3]:
-
-
 # !pip install "darts[all]" statsmodels optuna
 
 
-# In[4]:
+# In[ ]:
 
 
 import torch
@@ -67,7 +64,7 @@ print("Device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else
 
 # Imports and config
 
-# In[6]:
+# In[ ]:
 
 
 import warnings
@@ -77,9 +74,10 @@ import matplotlib.pyplot as plt
 
 from src import *
 from src import _maybe_scale_covs, _skill  # not re-exported by import *
+
 from darts import TimeSeries
 from darts.dataprocessing.transformers import (
-    WindowTransformer, StaticCovariatesTransformer, Scaler, Diff,
+    WindowTransformer, StaticCovariatesTransformer, Scaler,
 )
 from darts.models import NaiveMean
 
@@ -93,7 +91,7 @@ print(f'CPU count: {available_threads}')
 
 # 
 
-# In[7]:
+# In[ ]:
 
 
 # -------------------- CONFIG --------------------
@@ -112,8 +110,9 @@ CV_STRIDE                       = 1
 
 # ---- Model groups ---------------------------------------------------------
 # Basic regressors only — all use plain regression losses (MSE / RMSE).
-# Differencing is applied to the target outside the model, so every learner
-# sees a (near-)stationary signal and can be trained with its default loss.
+# A log(1+x) transform is applied to the target outside the model, so every
+# learner sees a variance-stabilised signal and can be trained with its
+# default loss.
 NAIVE_MODELS    = {"naive_last", "naive_weekly"}
 NEURAL_MODELS   = {"lstm"}
 LOCAL_MODELS    = {"arima"}
@@ -138,15 +137,13 @@ if torch.cuda.is_available():
     torch.set_float32_matmul_precision("high")
 
 
-# ## 1. Load data
-
-# In[8]:
+# In[ ]:
 
 
 regions,master_timeseries,regions_activity = load_data(data_path=FIXED_DATA_PATH,dataset_path=DATASET_PATH)
 
 
-# In[9]:
+# In[ ]:
 
 
 for_global_reset, global_weather_columns = get_engineered_features(
@@ -159,20 +156,20 @@ for_global_reset, global_weather_columns = get_engineered_features(
 )
 
 
-# In[10]:
+# In[ ]:
 
 
 print(for_global_reset.head())
 
 
-# In[11]:
+# In[ ]:
 
 
 print(for_global_reset.isna().any()[lambda x: x])
 # print(for_global_reset[for_global_reset["Activity_Level"].isna() == True][['Activity_Level','event_date','region']])
 
 
-# In[12]:
+# In[ ]:
 
 
 # Future vs past covariate split
@@ -183,13 +180,13 @@ holiday_cols, future_covariates, exclude_cols, past_covariates = split_future_an
 # Getting lag
 #  variabels
 
-# In[13]:
+# In[ ]:
 
 
 target_series_list, past_covs_list,future_covs_list = build_ts_and_apply_window_transformer(for_global_reset,TARGET,past_covariates,future_covariates,ed_alpha=halflife_to_alpha(7))
 
 
-# In[14]:
+# In[ ]:
 
 
 raw_past_covs_list = TimeSeries.from_group_dataframe(
@@ -202,55 +199,68 @@ raw_past_covs_list = TimeSeries.from_group_dataframe(
 # ## Encode static covariates and split 70/10/20
 # 
 
-# In[15]:
+# In[ ]:
 
 
 region_names, train_target, val_target, test_target, full_past_covs, full_fut_covs, target_for_cv, TRAIN_VAL_END,CV_START_VAL =\
       get_covs_and_encodings(target_series_list,past_covs_list,future_covs_list,TRAIN_FRAC,VAL_FRAC)
 
 
-# ## Difference the target series
+# ## Log-transform the target series
 # 
-# The drone-strike count series are non-stationary (slow drifts, level shifts).
-# Apply a single first-order difference per region: `y'_t = y_t - y_{t-1}`.
+# The drone-strike count series have heavy right tails and are zero-inflated
+# with occasional spikes. Apply a per-region log transform: `y'_t = log(1 + y_t)`.
 # 
-# * Every learner downstream is trained on the **diffed** target — its default
-#   regression loss (MSE / RMSE) becomes appropriate, no count-aware likelihood
-#   needed.
-# * Past and future covariates stay raw (the learners can lag-shift them
-#   themselves; no need to diff features as well).
-# * At prediction time we **un-diff** by anchoring on the last actual level
-#   before the forecast window: `y_hat(t+h) = y(t-1) + cumsum(y'_hat)`. The
-#   un-diffing happens inside `run_expanding_cv` so callers always get
-#   predictions in the original level space and the existing eval pipeline
-#   works unchanged.
+# * Every learner downstream is trained on the **log-transformed** target — its
+#   default regression loss (MSE / RMSE) becomes appropriate for the
+#   variance-stabilised signal, no count-aware likelihood needed.
+# * Past and future covariates stay raw (no need to log-transform features as
+#   well; the learners can lag-shift them themselves).
+# * At prediction time we invert element-wise: `y_hat(t+h) = exp(y'_hat(t+h)) - 1`.
+#   Unlike differencing, the log inverse is **stateless** — there is no anchor
+#   value to track. The inversion happens inside `run_expanding_cv` so callers
+#   always get predictions in the original level space and the existing eval
+#   pipeline works unchanged.
 # 
 
-# In[16]:
+# In[ ]:
 
 
-# Per-region first-order difference of the target. We hold on to BOTH lists:
-# the diffed list trains the model, the level list (target_for_cv from above)
-# is what predictions get un-diffed onto + scored against.
+# Per-region log(1+x) transform of the target. We hold on to BOTH lists:
+# the log list trains the model, the level list (target_for_cv from above)
+# is what predictions get inverted onto + scored against.
 
-diff_transformer = Diff(lags=1, dropna=True)
-target_series_diff_list = diff_transformer.fit_transform(target_series_list)
+def _log1p_series(ts):
+    """log(1+x) transform of a TimeSeries; preserves time index and static
+    covariates. Counts are >= 0 by construction so log1p is well-defined; the
+    clip is a defensive guard against any tiny negative residuals from upstream
+    windowed transforms.
+    """
+    vals = np.clip(np.asarray(ts.values(), dtype=float), 0.0, None)
+    return TimeSeries.from_times_and_values(
+        ts.time_index,
+        np.log1p(vals),
+        static_covariates=ts.static_covariates,
+    )
 
-_, train_target_diff, val_target_diff, test_target_diff, _, _, target_for_cv_diff, _, _ = \
-    get_covs_and_encodings(target_series_diff_list, past_covs_list, future_covs_list, TRAIN_FRAC, VAL_FRAC)
+target_series_log_list = [_log1p_series(ts) for ts in target_series_list]
+
+_, train_target_log, val_target_log, test_target_log, _, _, target_for_cv_log, _, _ = \
+    get_covs_and_encodings(target_series_log_list, past_covs_list, future_covs_list, TRAIN_FRAC, VAL_FRAC)
 
 print(f"original len (region 0): {len(target_series_list[0])}")
-print(f"diffed   len (region 0): {len(target_series_diff_list[0])}  (loses 1 timestep)")
-print(f"diffed train/val/test:   {len(train_target_diff[0])} / {len(val_target_diff[0])} / {len(test_target_diff[0])}")
-print(f"target_for_cv_diff len:  {len(target_for_cv_diff[0])}")
+print(f"logged   len (region 0): {len(target_series_log_list[0])}  (no timesteps lost)")
+print(f"logged train/val/test:   {len(train_target_log[0])} / {len(val_target_log[0])} / {len(test_target_log[0])}")
+print(f"target_for_cv_log len:   {len(target_for_cv_log[0])}")
 
 
 # ## Regressors
 # 
 # Each model gets the **same** `INPUT_LAGS`, `OUTPUT_CHUNK_LEN`, encoders and
 # covariates so only the learner changes. All GBDTs use a plain regression
-# objective (MSE / RMSE) because differenced counts can be negative — Poisson /
-# Tweedie likelihoods don't apply here.
+# objective (MSE / RMSE). Poisson / Tweedie likelihoods don't apply here either:
+# `log(1+y)` is real-valued and the variance is approximately stabilised, so MSE
+# on the transformed scale is the natural objective.
 # 
 # **What's worth tuning** (★ = high impact, · = secondary):
 # * GBDTs — `★ n_estimators + learning_rate`, `★ max_depth / num_leaves / depth`,
@@ -258,17 +268,27 @@ print(f"target_for_cv_diff len:  {len(target_for_cv_diff[0])}")
 #   `· subsample`, `· colsample_bytree`, `· reg_alpha / reg_lambda`.
 # * `lstm` — `★ hidden_dim`, `★ n_rnn_layers`, `★ dropout`,
 #   `· batch_size`, `· lr`, `· weight_decay`. Default MSE loss; covariates
-#   scaled, target left as-is (it's already centered around zero post-diff).
-# * `arima` — `★ p, q`, `★ d` left at 0 since the input is already diffed.
+#   scaled, target left in log space (already variance-stabilised).
+# * `arima` — `★ p, q`, with `d=1` (the log-transform stabilises variance
+#   but does **not** remove trend, so one integration order is still warranted).
 # * `linear` — included as a floor (no real tuning surface beyond the shared lags).
 # 
 
-# In[17]:
+# In[ ]:
 
 
 from pytorch_lightning.callbacks import EarlyStopping
 # --- Shared forecasting skeleton: every tabular model gets the same inputs ---
-COMMON_KWARGS_TAB = get_common_kwargs()
+COMMON_KWARGS_TAB = dict(
+    lags                    = INPUT_LAGS,
+    lags_past_covariates    = [-1],
+    lags_future_covariates  = (2, OUTPUT_CHUNK_LEN),
+    output_chunk_length     = OUTPUT_CHUNK_LEN,
+    output_chunk_shift      = 0,
+    add_encoders            = {
+        "cyclic": {"future": ["month", "week", "dayofyear", "dayofweek", "day"]},
+    },
+)
 
 ES_NN = EarlyStopping(monitor="train_loss", patience=10, min_delta=1e-4, mode="min")
 
@@ -283,11 +303,12 @@ NN_TRAINER_KWARGS = dict(
 
 
 def build_regressor(name: str):
-    """Return a Darts forecasting model ready to ``.fit()`` on the DIFFED target.
+    """Return a Darts forecasting model ready to ``.fit()`` on the LOG-transformed target.
 
     All GBDTs use plain regression losses; the LSTM uses the default MSE; ARIMA
-    runs on the already-diffed series with d=0; the linear baseline has no
-    tuning surface beyond the shared `INPUT_LAGS`.
+    runs on the log-transformed series with d=1 (log stabilises variance only,
+    not trend); the linear baseline has no tuning surface beyond the shared
+    `INPUT_LAGS`.
     """
     name = name.lower()
 
@@ -310,7 +331,6 @@ def build_regressor(name: str):
             random_state      = RANDOM_STATE,
             verbose           = -1,
             device_type       = "cpu",
-            # device_type  = "gpu",
             num_threads       = available_threads,
             force_col_wise    = True,
         )
@@ -330,8 +350,8 @@ def build_regressor(name: str):
             reg_alpha         = 0.0,
             reg_lambda        = 1.0,
             tree_method       = "hist",
-            # device            = "cpu",
             device       = "cuda",
+            # device            = "cpu",
             # n_jobs            = available_threads,
             random_state      = RANDOM_STATE,
             verbosity         = 0,
@@ -349,8 +369,8 @@ def build_regressor(name: str):
             l2_leaf_reg       = 3,
             subsample         = 0.8,
             bootstrap_type    = "Bernoulli",
-            # task_type         = "CPU",
             task_type          = "GPU",
+            # task_type         = "CPU",
             # thread_count      = available_threads,
             random_seed       = RANDOM_STATE,
             verbose           = False,
@@ -377,23 +397,22 @@ def build_regressor(name: str):
             batch_size          = 64,
             n_epochs            = 30,
             random_state        = RANDOM_STATE,
-            add_encoders = {
-                "cyclic": {
+                            add_encoders        =                 {"cyclic": {
                     "past": ["month", "week", "dayofyear", "dayofweek", "day"]
-                           },
-                },
-                pl_trainer_kwargs   = NN_TRAINER_KWARGS,
+                           }},
+            pl_trainer_kwargs   = NN_TRAINER_KWARGS,
         )
 
     # ---------------- ARIMA (per region, no covariates here) ---------------
-    # The input is already diffed, so d=0.
+    # The input is log-transformed (variance-stabilised) but still trended,
+    # so we keep one integration order: d=1.
     if name == "arima":
         from darts.models import ARIMA
         return ARIMA(
             p = 7,
-            d = 0,
+            d = 1,
             q = 1,
-            random_state = RANDOM_STATE,    
+            random_state = RANDOM_STATE,
         )
 
     if name in NAIVE_MODELS:
@@ -420,7 +439,7 @@ def build_gbm_from_params(variant: str, params: dict):
             objective      = "regression",
             random_state   = RANDOM_STATE,
             verbose        = -1,
-            # device_type  = "gpu",
+            # device_type  = "cuda",
             device_type    = "cpu",
             num_threads    = available_threads,
             force_col_wise = True,
@@ -476,7 +495,7 @@ def build_lstm_from_params(params: dict):
 # all four notebooks compete on the same feature set.
 # 
 
-# In[18]:
+# In[ ]:
 
 
 # A single LightGBM-regression model, trained on everything, purely to rank features.
@@ -484,7 +503,7 @@ def build_lstm_from_params(params: dict):
 # set is shared across all four comparisons.
 import pickle
 from pathlib import Path
-path = Path('./features/diffreg_saved_sets.pkl')
+path = Path('./features/logereg_saved_sets.pkl')
 if path.exists():
     with open(path, "rb") as f:
         region_names, train_target, val_target, test_target, full_past_covs, full_fut_covs, target_for_cv, TRAIN_VAL_END, CV_START_VAL = pickle.load(f)
@@ -546,34 +565,34 @@ else:
     print(f"Saved computed sets to {path}")
 
 
-# In[19]:
+# In[ ]:
 
 
 _, _, _, _, full_raw_past_covs_LSTM, _, _, _, _ = \
     get_covs_and_encodings(target_series_list, raw_past_covs_list, future_covs_list, TRAIN_FRAC, VAL_FRAC)
 
 
-# ### Re-derive diffed targets to match the selected feature set
+# ### Re-derive log-transformed targets to match the selected feature set
 # 
 # The feature-selection step may rebuild `target_series_list` / `target_for_cv`
-# on a pruned covariate set. Re-derive the diffed target lists from those so
-# the CV indices are aligned with the encoded targets.
+# on a pruned covariate set. Re-derive the log-transformed target lists from
+# those so the CV indices are aligned with the encoded targets.
 # 
 
-# In[20]:
+# In[ ]:
 
 
-# Re-derive the diffed targets after feature selection. `target_series_list`
-# itself is unchanged by the FS step (only past/future covs get pruned), so
-# the diffed series is identical — but routing through `get_covs_and_encodings`
-# again gives us the encoded statics that the boosters need.
-diff_transformer = Diff(lags=1, dropna=True)
-target_series_diff_list = diff_transformer.fit_transform(target_series_list)
+# Re-derive the log-transformed targets after feature selection.
+# `target_series_list` itself is unchanged by the FS step (only past/future
+# covs get pruned), so the log-transformed series is identical — but routing
+# through `get_covs_and_encodings` again gives us the encoded statics that the
+# boosters need.
+target_series_log_list = [_log1p_series(ts) for ts in target_series_list]
 
-_, train_target_diff, val_target_diff, test_target_diff, _, _, target_for_cv_diff, _, _ = \
-    get_covs_and_encodings(target_series_diff_list, past_covs_list, future_covs_list, TRAIN_FRAC, VAL_FRAC)
+_, train_target_log, val_target_log, test_target_log, _, _, target_for_cv_log, _, _ = \
+    get_covs_and_encodings(target_series_log_list, past_covs_list, future_covs_list, TRAIN_FRAC, VAL_FRAC)
 
-print(f"diffed target_for_cv length: {len(target_for_cv_diff[0])}")
+print(f"log target_for_cv length: {len(target_for_cv_log[0])}")
 print(f"CV start (reusing level CV_START_VAL): {CV_START_VAL:.3f}")
 
 
@@ -584,7 +603,7 @@ print(f"CV start (reusing level CV_START_VAL): {CV_START_VAL:.3f}")
 # original training series. This keeps MASE / RMSSE comparable across notebooks.
 # 
 
-# In[21]:
+# In[ ]:
 
 
 from sklearn.metrics import (
@@ -605,7 +624,7 @@ MAE_SCALES, RMSE_SCALES = compute_naive_scales(
 )
 
 
-# In[22]:
+# In[ ]:
 
 
 # plot_region_horizon_heatmap imported from src
@@ -619,14 +638,16 @@ MAE_SCALES, RMSE_SCALES = compute_naive_scales(
 # serious model has to beat both.
 # 
 
-# In[23]:
+# In[ ]:
 
 
 # naive_last_historical_forecasts imported from src
 
+# naive_weekly_historical_forecasts imported from src
 
 
-# In[24]:
+
+# In[ ]:
 
 
 # naive_collect_long imported from src
@@ -636,51 +657,49 @@ MAE_SCALES, RMSE_SCALES = compute_naive_scales(
 # ## Train + cross-validate every model
 # 
 # Same expanding-window CV as the other notebooks, with one twist: every
-# non-naive learner is trained on the **diffed** target, predicts diffs for the
-# next 7 days, and the runner converts predictions back to the **level** scale
-# using the last actual value as anchor:
+# non-naive learner is trained on the **log-transformed** target, predicts in
+# log space for the next 7 days, and the runner converts predictions back to
+# the **level** scale element-wise:
 # 
 # ```
-# y_hat_level(t+h) = y(t-1) + cumsum( y_hat_diff(t+1 .. t+h) )
+# y_hat_level(t+h) = exp( y_hat_log(t+h) ) - 1
 # ```
 # 
 # The level predictions are what flows into `evaluate_long`, so the leaderboard
 # is in the same units as the GBDT / LSTM / Chronos2 notebooks.
 # 
-# ARIMA is local (one model per region, no covariates here, `d=0` because the
-# input is already diffed). Naive baselines run directly on the level series.
-# Linear, GBDTs and LSTM are global — one model fit across all regions.
+# ARIMA is local (one model per region, no covariates here, `d=1` because the
+# log transform stabilises variance but not trend). Naive baselines run directly
+# on the level series. Linear, GBDTs and LSTM are global — one model fit across
+# all regions.
 # 
 
-# In[25]:
+# In[ ]:
 
 
 # _maybe_scale_covs imported from src
 
-def _diff_to_level(diff_pred_ts, level_anchor_ts):
-    """Un-diff a single fold-prediction: anchor = last actual level before the
-    forecast window. Returns a TimeSeries on the same time index as the input.
-    """
-    first_pred_time = diff_pred_ts.time_index[0]
-    # find the timestamp immediately before the first predicted timestamp
-    anchor_idx = level_anchor_ts.time_index.get_loc(first_pred_time) - 1
-    anchor_value = float(level_anchor_ts.values()[anchor_idx, 0])
+def _log_to_level(log_pred_ts):
+    """Invert the log(1+x) transform: y_hat_level = exp(y_hat_log) - 1.
 
-    diff_vals  = diff_pred_ts.values().ravel()
-    level_vals = anchor_value + np.cumsum(diff_vals)
+    Element-wise — no anchor needed (unlike the differencing inverse), because
+    the log transform is stateless. Returns a TimeSeries on the same time
+    index as the input.
+    """
+    log_vals   = log_pred_ts.values().ravel()
+    level_vals = np.expm1(log_vals)
     return TimeSeries.from_times_and_values(
-        diff_pred_ts.time_index,
+        log_pred_ts.time_index,
         level_vals.reshape(-1, 1),
     )
 
 
-# In[28]:
+# In[ ]:
 
 
 def run_expanding_cv(
     builder_fn,
-    target_diff_list,
-    target_level_list,
+    target_log_list,
     start_frac,
     *,
     is_local=False,
@@ -692,19 +711,17 @@ def run_expanding_cv(
     future_covs=None,
     verbose=True,
 ):
-    """Expanding-window CV on diffed targets. Predictions returned in LEVEL space.
+    """Expanding-window CV on log-transformed targets. Predictions returned in LEVEL space.
 
-    target_diff_list  -- what the model is trained / predicted on
-    target_level_list -- used for the un-diff anchor (and is also what the
-                         caller will compare against via evaluate_long)
-    start_frac        -- fraction of the diffed series at which CV starts
-    retrain_stride    -- retrain every this many prediction steps (default: OUTPUT_CHUNK_LEN)
+    target_log_list -- log(1+y) targets that the model is trained / predicted on
+    start_frac      -- fraction of the log series at which CV starts
+    retrain_stride  -- retrain every this many prediction steps (default: OUTPUT_CHUNK_LEN)
     """
-    ref_diff  = target_diff_list[0]
-    n_total   = len(ref_diff)
+    ref_log   = target_log_list[0]
+    n_total   = len(ref_log)
     start_idx = int(start_frac * n_total)
 
-    n_regions      = len(target_diff_list)
+    n_regions      = len(target_log_list)
     all_fold_preds = [[] for _ in range(n_regions)]
     n_preds    = 0
     n_retrains = 0
@@ -717,10 +734,10 @@ def run_expanding_cv(
 
     for t0 in range(start_idx, n_total - horizon + 1, stride):
         steps_since_start = t0 - start_idx
-        split_time        = ref_diff.time_index[t0]
+        split_time        = ref_log.time_index[t0]
 
         if steps_since_start % retrain_stride == 0:
-            train_series = [ts.drop_after(split_time) for ts in target_diff_list]
+            train_series = [ts.drop_after(split_time) for ts in target_log_list]
             if is_local:
                 _local_builder = builder_fn
             else:
@@ -735,11 +752,11 @@ def run_expanding_cv(
             if verbose:
                 print(f"   retrain {n_retrains}  (data up to {split_time.date()})")
 
-        pred_series = [ts.drop_after(split_time) for ts in target_diff_list]
+        pred_series = [ts.drop_after(split_time) for ts in target_log_list]
 
         if is_local:
-            # ARIMA per region, fit on diffed series with d=0.
-            diff_preds = []
+            # ARIMA per region, fit on log-transformed series with d=1.
+            log_preds = []
             for ts in pred_series:
                 try:
                     m = _local_builder()
@@ -749,20 +766,17 @@ def run_expanding_cv(
                     fallback = NaiveMean()
                     fallback.fit(ts)
                     pred = fallback.predict(n=horizon)
-                diff_preds.append(pred)
+                log_preds.append(pred)
         else:
             pred_kwargs = {"n": horizon, "series": pred_series}
             if past_for_fit is not None and model.supports_past_covariates:
                 pred_kwargs["past_covariates"] = past_for_fit
             if fut_for_fit is not None and model.supports_future_covariates:
                 pred_kwargs["future_covariates"] = fut_for_fit
-            diff_preds = model.predict(show_warnings=False, **pred_kwargs)
+            log_preds = model.predict(show_warnings=False, **pred_kwargs)
 
-        # Un-diff each region's prediction back to level space.
-        level_preds = [
-            _diff_to_level(dp, target_level_list[r_idx])
-            for r_idx, dp in enumerate(diff_preds)
-        ]
+        # Invert each region's prediction back to level space (element-wise).
+        level_preds = [_log_to_level(lp) for lp in log_preds]
 
         for r_idx, p in enumerate(level_preds):
             all_fold_preds[r_idx].append(p)
@@ -775,8 +789,7 @@ def run_expanding_cv(
 
 def run_expanding_cv_iter(
     builder_fn,
-    target_diff_list,
-    target_level_list,
+    target_log_list,
     start_frac,
     *,
     is_local=False,
@@ -790,10 +803,10 @@ def run_expanding_cv_iter(
 ):
     """Generator twin of run_expanding_cv — yields cumulative fold preds after
     each prediction step so Optuna's MedianPruner can fire."""
-    ref_diff  = target_diff_list[0]
-    n_total   = len(ref_diff)
+    ref_log   = target_log_list[0]
+    n_total   = len(ref_log)
     start_idx = int(start_frac * n_total)
-    n_regions = len(target_diff_list)
+    n_regions = len(target_log_list)
     all_fold_preds = [[] for _ in range(n_regions)]
     model      = None
     _local_builder = None
@@ -804,10 +817,10 @@ def run_expanding_cv_iter(
 
     for t0 in range(start_idx, n_total - horizon + 1, stride):
         steps_since_start = t0 - start_idx
-        split_time        = ref_diff.time_index[t0]
+        split_time        = ref_log.time_index[t0]
 
         if steps_since_start % retrain_stride == 0:
-            train_series = [ts.drop_after(split_time) for ts in target_diff_list]
+            train_series = [ts.drop_after(split_time) for ts in target_log_list]
             if is_local:
                 _local_builder = builder_fn
             else:
@@ -819,10 +832,10 @@ def run_expanding_cv_iter(
                     fit_kwargs["future_covariates"] = fut_for_fit
                 model.fit(**fit_kwargs)
 
-        pred_series = [ts.drop_after(split_time) for ts in target_diff_list]
+        pred_series = [ts.drop_after(split_time) for ts in target_log_list]
 
         if is_local:
-            diff_preds = []
+            log_preds = []
             for ts in pred_series:
                 try:
                     m = _local_builder()
@@ -832,28 +845,24 @@ def run_expanding_cv_iter(
                     fallback = NaiveMean()
                     fallback.fit(ts)
                     pred = fallback.predict(n=horizon)
-                diff_preds.append(pred)
+                log_preds.append(pred)
         else:
             pred_kwargs = {"n": horizon, "series": pred_series}
             if past_for_fit is not None and model.supports_past_covariates:
                 pred_kwargs["past_covariates"] = past_for_fit
             if fut_for_fit is not None and model.supports_future_covariates:
                 pred_kwargs["future_covariates"] = fut_for_fit
-            diff_preds = model.predict(show_warnings=False, **pred_kwargs)
+            log_preds = model.predict(show_warnings=False, **pred_kwargs)
 
-        level_preds = [
-            _diff_to_level(dp, target_level_list[r_idx])
-            for r_idx, dp in enumerate(diff_preds)
-        ]
+        level_preds = [_log_to_level(lp) for lp in log_preds]
         for r_idx, p in enumerate(level_preds):
             all_fold_preds[r_idx].append(p)
 
         yield [list(rp) for rp in all_fold_preds]
 
-def run_final_test_diff(
+def run_final_test_log(
     builder_fn,
-    target_diff_list,
-    target_level_list,
+    target_log_list,
     start_frac,
     *,
     predict_stride=1,
@@ -867,12 +876,12 @@ def run_final_test_diff(
 ):
     """Like run_expanding_cv but predict_stride and retrain_stride are decoupled.
 
-    Trains in diff space; returns predictions in level space (via _diff_to_level).
+    Trains in log space; returns predictions in level space (via _log_to_level).
     """
-    ref_diff  = target_diff_list[0]
-    n_total   = len(ref_diff)
+    ref_log   = target_log_list[0]
+    n_total   = len(ref_log)
     start_idx = int(start_frac * n_total)
-    n_regions = len(target_diff_list)
+    n_regions = len(target_log_list)
 
     all_fold_preds = [[] for _ in range(n_regions)]
     n_preds    = 0
@@ -888,8 +897,8 @@ def run_final_test_diff(
         steps_since_start = t0 - start_idx
 
         if steps_since_start % retrain_stride == 0:
-            retrain_time = ref_diff.time_index[t0]
-            train_series = [ts.drop_after(retrain_time) for ts in target_diff_list]
+            retrain_time = ref_log.time_index[t0]
+            train_series = [ts.drop_after(retrain_time) for ts in target_log_list]
 
             if is_local:
                 _local_builder = builder_fn
@@ -906,11 +915,11 @@ def run_final_test_diff(
             if verbose:
                 print(f"   retrain {n_retrains}  (data up to {retrain_time.date()})")
 
-        split_time   = ref_diff.time_index[t0]
-        pred_series  = [ts.drop_after(split_time) for ts in target_diff_list]
+        split_time   = ref_log.time_index[t0]
+        pred_series  = [ts.drop_after(split_time) for ts in target_log_list]
 
         if is_local:
-            diff_preds = []
+            log_preds = []
             for ts in pred_series:
                 try:
                     m = _local_builder()
@@ -920,19 +929,16 @@ def run_final_test_diff(
                     fallback = NaiveMean()
                     fallback.fit(ts)
                     pred = fallback.predict(n=horizon)
-                diff_preds.append(pred)
+                log_preds.append(pred)
         else:
             pred_kwargs = {"n": horizon, "series": pred_series, "show_warnings": False}
             if past_for_fit is not None and model.supports_past_covariates:
                 pred_kwargs["past_covariates"] = past_for_fit
             if fut_for_fit is not None and model.supports_future_covariates:
                 pred_kwargs["future_covariates"] = fut_for_fit
-            diff_preds = model.predict(**pred_kwargs)
+            log_preds = model.predict(**pred_kwargs)
 
-        level_preds = [
-            _diff_to_level(dp, target_level_list[r_idx])
-            for r_idx, dp in enumerate(diff_preds)
-        ]
+        level_preds = [_log_to_level(lp) for lp in log_preds]
         for r_idx, p in enumerate(level_preds):
             all_fold_preds[r_idx].append(p)
         n_preds += 1
@@ -948,27 +954,25 @@ def run_final_test_diff(
 from collections import defaultdict
 
 
-def run_final_test_diff_per_activity(
-    builder_fn, target_diff_list, target_level_list,
-    region_names, regions_activity, start_frac, *,
+def run_final_test_log_per_activity(
+    builder_fn, target_log_list, region_names, regions_activity, start_frac, *,
     horizon=OUTPUT_CHUNK_LEN, predict_stride=1, retrain_stride,
     past_covs=None, future_covs=None, is_local=False, is_neural=False, verbose=True,
 ):
-    """Train one model per activity-level group in diff space; return level-space preds."""
+    """Train one model per activity-level group in log space; return level-space preds."""
     groups = defaultdict(list)
     for i, region in enumerate(region_names):
         groups[regions_activity[region]].append(i)
-    all_fold_preds = [None] * len(target_diff_list)
+    all_fold_preds = [None] * len(target_log_list)
     for level in sorted(groups):
         indices = groups[level]
         if verbose:
             print(f"\n--- Activity level {level} ({len(indices)} regions) ---")
-        group_diff  = [target_diff_list[i]  for i in indices]
-        group_level = [target_level_list[i] for i in indices]
-        group_past  = [past_covs[i]   for i in indices] if past_covs   is not None else None
-        group_fut   = [future_covs[i] for i in indices] if future_covs is not None else None
-        group_preds = run_final_test_diff(
-            builder_fn, group_diff, group_level, start_frac,
+        group_log  = [target_log_list[i] for i in indices]
+        group_past = [past_covs[i]   for i in indices] if past_covs   is not None else None
+        group_fut  = [future_covs[i] for i in indices] if future_covs is not None else None
+        group_preds = run_final_test_log(
+            builder_fn, group_log, start_frac,
             predict_stride=predict_stride, retrain_stride=retrain_stride,
             horizon=horizon, past_covs=group_past, future_covs=group_fut,
             is_local=is_local, is_neural=is_neural, verbose=verbose,
@@ -978,20 +982,19 @@ def run_final_test_diff_per_activity(
     return all_fold_preds
 
 
-def run_final_test_diff_per_region(
-    builder_fn, target_diff_list, target_level_list, start_frac, *,
+def run_final_test_log_per_region(
+    builder_fn, target_log_list, start_frac, *,
     horizon=OUTPUT_CHUNK_LEN, predict_stride=1, retrain_stride,
     past_covs=None, future_covs=None, is_neural=False, verbose=True,
 ):
-    """Train one model per region in diff space; return level-space preds."""
+    """Train one model per region in log space; return level-space preds."""
     all_fold_preds = []
-    for i in range(len(target_diff_list)):
+    for i in range(len(target_log_list)):
         if verbose:
-            print(f"\n--- Region {i + 1}/{len(target_diff_list)} ---")
-        region_preds = run_final_test_diff(
+            print(f"\n--- Region {i + 1}/{len(target_log_list)} ---")
+        region_preds = run_final_test_log(
             builder_fn,
-            [target_diff_list[i]],
-            [target_level_list[i]],
+            [target_log_list[i]],
             start_frac,
             predict_stride=predict_stride,
             retrain_stride=retrain_stride,
@@ -1025,6 +1028,7 @@ def _suggest_lightgbm_params(trial):
         "reg_lambda":        trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
     }
 
+
 def _suggest_xgboost_params(trial):
     return {
         "max_depth":        trial.suggest_int("max_depth", 3, 10),
@@ -1036,6 +1040,7 @@ def _suggest_xgboost_params(trial):
         "reg_alpha":        trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
         "reg_lambda":       trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
     }
+
 
 def _suggest_catboost_params(trial):
     return {
@@ -1090,7 +1095,6 @@ def _nn_trainer_kwargs(trial=None):
     )
 
 
-
 def _suggest_lstm_params(trial, input_chunk_length: int, model_type: str = "LSTM"):
     """RNN (LSTM or GRU) with default MSE loss — model type fixed per variant."""
     fc_choice = trial.suggest_categorical("hidden_fc_sizes", ["none", "32", "64", "64_32"])
@@ -1110,7 +1114,7 @@ def _suggest_lstm_params(trial, input_chunk_length: int, model_type: str = "LSTM
             "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True),
         },
         random_state        = RANDOM_STATE,
-                add_encoders        =                 {"cyclic": {
+                        add_encoders        =                 {"cyclic": {
                     "past": ["month", "week", "dayofyear", "dayofweek", "day"]
                            }},
         pl_trainer_kwargs   = _nn_trainer_kwargs(trial),
@@ -1134,12 +1138,11 @@ def make_gbm_objective(variant: str):
         last_score = None
         for step, cumulative_fold_preds in enumerate(run_expanding_cv_iter(
             builder,
-            target_diff_list  = target_for_cv_diff,
-            target_level_list = target_for_cv,
-            start_frac        = CV_START_VAL,
-            past_covs         = full_past_covs,
-            future_covs       = full_fut_covs,
-            verbose           = False,
+            target_log_list = target_for_cv_log,
+            start_frac      = CV_START_VAL,
+            past_covs       = full_past_covs,
+            future_covs     = full_fut_covs,
+            verbose         = False,
         )):
             last_score = _score_fold_preds(
                 cumulative_fold_preds, target_for_cv, region_names,
@@ -1162,13 +1165,12 @@ def make_nn_objective(variant: str):
 
         fold_preds = run_expanding_cv(
             builder,
-            target_diff_list  = target_for_cv_diff,
-            target_level_list = target_for_cv,
-            start_frac        = CV_START_VAL,
-            past_covs         = full_raw_past_covs_LSTM,
-            future_covs       = full_fut_covs,
-            is_neural         = True,
-            verbose           = False,
+            target_log_list = target_for_cv_log,
+            start_frac      = CV_START_VAL,
+            past_covs       = full_raw_past_covs_LSTM,
+            future_covs     = full_fut_covs,
+            is_neural       = True,
+            verbose         = False,
         )
         return _score_fold_preds(
             fold_preds, target_for_cv, region_names, metric="RMSSE_mean"
@@ -1193,7 +1195,7 @@ import pickle
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-TUNE_CKPT = Path(PROJECT_DIR) / "checkpoints_tune_diff"
+TUNE_CKPT = Path(PROJECT_DIR) / "checkpoints_tune_log"
 TUNE_CKPT.mkdir(exist_ok=True)
 
 best_params_by_variant = {}
@@ -1259,7 +1261,7 @@ for variant in all_variants:
 import pickle
 from pathlib import Path
 
-CKPT = Path(PROJECT_DIR) / "checkpoints_diff"
+CKPT = Path(PROJECT_DIR) / "checkpoints_log"
 CKPT.mkdir(exist_ok=True)
 
 long_by_model       = {}
@@ -1271,6 +1273,7 @@ def _build_lstm_from_best(variant: str, best: dict):
     fc_map = {"none": [], "32": [32], "64": [64], "64_32": [64, 32]}
     b      = dict(best)
     model_type, icl = parse_lstm_variant(variant)
+
     params = dict(
         model               = model_type,
         input_chunk_length  = icl,
@@ -1310,12 +1313,11 @@ for variant, best_params in best_params_by_variant.items():
 
     fold_preds = run_expanding_cv(
         builder,
-        target_diff_list  = target_for_cv_diff,
-        target_level_list = target_for_cv,
-        start_frac        = CV_START_VAL,
-        past_covs         = chosen_past,
-        future_covs       = full_fut_covs,
-        is_neural         = is_neural,
+        target_log_list = target_for_cv_log,
+        start_frac      = CV_START_VAL,
+        past_covs       = chosen_past,
+        future_covs     = full_fut_covs,
+        is_neural       = is_neural,
     )
     long_df = collect_predictions_long(target_for_cv, fold_preds, region_names)
     long_by_model[name]       = long_df
@@ -1324,15 +1326,14 @@ for variant, best_params in best_params_by_variant.items():
         pickle.dump((long_df, fold_preds), f)
 
 
-# --- 2) ARIMA (per region, no covariates, fed the diffed series) -----------
+# --- 2) ARIMA (per region, no covariates, fed the log-transformed series) ---
 if "arima" not in long_by_model:
     print("\n=== ARIMA (local, per region) ===")
     arima_fold_preds = run_expanding_cv(
         lambda: build_regressor("arima"),
-        target_diff_list  = target_for_cv_diff,
-        target_level_list = target_for_cv,
-        start_frac        = CV_START_VAL,
-        is_local          = True,
+        target_log_list = target_for_cv_log,
+        start_frac      = CV_START_VAL,
+        is_local        = True,
     )
     long_by_model["arima"]       = collect_predictions_long(target_for_cv, arima_fold_preds, region_names)
     fold_preds_by_model["arima"] = arima_fold_preds
@@ -1343,17 +1344,16 @@ if "linear" not in long_by_model:
     print("\n=== Linear regression (global, default config) ===")
     lin_fold_preds = run_expanding_cv(
         lambda: build_regressor("linear"),
-        target_diff_list  = target_for_cv_diff,
-        target_level_list = target_for_cv,
-        start_frac        = CV_START_VAL,
-        past_covs         = full_past_covs,
-        future_covs       = full_fut_covs,
+        target_log_list = target_for_cv_log,
+        start_frac      = CV_START_VAL,
+        past_covs       = full_past_covs,
+        future_covs     = full_fut_covs,
     )
     long_by_model["linear"]       = collect_predictions_long(target_for_cv, lin_fold_preds, region_names)
     fold_preds_by_model["linear"] = lin_fold_preds
 
 
-# --- 4) Naive baselines (level series, no diff) ----------------------------
+# --- 4) Naive baselines (level series, no transform) -----------------------
 for naive in ["naive_last", "naive_weekly"]:
     if naive in long_by_model:
         continue
@@ -1363,7 +1363,8 @@ for naive in ["naive_last", "naive_weekly"]:
     fold_preds_by_model[naive] = fold_preds
 
 
-# ## Leaderboard — which (basic) regressor wins on the diffed target?
+# ## Leaderboard — which (basic) regressor wins on the log-transformed target?
+# 
 
 # In[ ]:
 
@@ -1429,19 +1430,19 @@ results_by_model[winner]["per_horizon"]
 
 # ## Test-set evaluation
 # 
-# Final hold-out CV: train on `train + val` (both in diff space), predict on the
-# test segment, un-diff to levels, evaluate against the level test target. Run
-# once per tuned model + ARIMA + linear + naives.
+# Final hold-out CV: train on `train + val` (both in log space), predict on the
+# test segment, invert via `expm1` to levels, evaluate against the level test
+# target. Run once per tuned model + ARIMA + linear + naives.
 # 
 
 # In[ ]:
 
 
-target_full      = [tr.append(vl).append(te)
-                    for tr, vl, te in zip(train_target, val_target, test_target)]
-target_full_diff = [tr.append(vl).append(te)
-                    for tr, vl, te in zip(train_target_diff, val_target_diff, test_target_diff)]
-TEST_START_FRAC  = TRAIN_VAL_END
+target_full     = [tr.append(vl).append(te)
+                   for tr, vl, te in zip(train_target, val_target, test_target)]
+target_full_log = [tr.append(vl).append(te)
+                   for tr, vl, te in zip(train_target_log, val_target_log, test_target_log)]
+TEST_START_FRAC = TRAIN_VAL_END
 
 test_long_by_model       = {}
 test_fold_preds_by_model = {}
@@ -1459,45 +1460,42 @@ for variant, best_params in best_params_by_variant.items():
         is_neural   = False
         chosen_past = full_past_covs
 
-    fold_preds = run_final_test_diff(
+    fold_preds = run_final_test_log(
         builder,
-        target_diff_list  = target_full_diff,
-        target_level_list = target_full,
-        start_frac        = TEST_START_FRAC,
-        predict_stride    = 1,
-        retrain_stride    = OUTPUT_CHUNK_LEN,
-        past_covs         = chosen_past,
-        future_covs       = full_fut_covs,
-        is_neural         = is_neural,
+        target_log_list = target_full_log,
+        start_frac      = TEST_START_FRAC,
+        predict_stride  = 1,
+        retrain_stride  = OUTPUT_CHUNK_LEN,
+        past_covs       = chosen_past,
+        future_covs     = full_fut_covs,
+        is_neural       = is_neural,
     )
     test_long_by_model[name]       = collect_predictions_long(target_full, fold_preds, region_names)
     test_fold_preds_by_model[name] = fold_preds
 
 # 2) ARIMA
 print("\n=== Test-set CV: arima ===")
-arima_fold_preds = run_final_test_diff(
+arima_fold_preds = run_final_test_log(
     lambda: build_regressor("arima"),
-    target_diff_list  = target_full_diff,
-    target_level_list = target_full,
-    start_frac        = TEST_START_FRAC,
-    predict_stride    = 1,
-    retrain_stride    = OUTPUT_CHUNK_LEN,
-    is_local          = True,
+    target_log_list = target_full_log,
+    start_frac      = TEST_START_FRAC,
+    predict_stride  = 1,
+    retrain_stride  = OUTPUT_CHUNK_LEN,
+    is_local        = True,
 )
 test_long_by_model["arima"]       = collect_predictions_long(target_full, arima_fold_preds, region_names)
 test_fold_preds_by_model["arima"] = arima_fold_preds
 
 # 3) Linear baseline
 print("\n=== Test-set CV: linear ===")
-lin_fold_preds = run_final_test_diff(
+lin_fold_preds = run_final_test_log(
     lambda: build_regressor("linear"),
-    target_diff_list  = target_full_diff,
-    target_level_list = target_full,
-    start_frac        = TEST_START_FRAC,
-    predict_stride    = 1,
-    retrain_stride    = OUTPUT_CHUNK_LEN,
-    past_covs         = full_past_covs,
-    future_covs       = full_fut_covs,
+    target_log_list = target_full_log,
+    start_frac      = TEST_START_FRAC,
+    predict_stride  = 1,
+    retrain_stride  = OUTPUT_CHUNK_LEN,
+    past_covs       = full_past_covs,
+    future_covs     = full_fut_covs,
 )
 test_long_by_model["linear"]       = collect_predictions_long(target_full, lin_fold_preds, region_names)
 test_fold_preds_by_model["linear"] = lin_fold_preds
@@ -1539,8 +1537,8 @@ print(test_leaderboard)
 # 
 # Each tuned variant is re-run in two additional training paradigms:
 # 
-# - **Activity-level model**: one model per conflict-intensity group (low / medium / high), trained in diff space on the homogeneous subset of regions it owns.
-# - **Local model**: one model per region (20 independent models), trained in diff space on its own series and covariates.
+# - **Activity-level model**: one model per conflict-intensity group (low / medium / high), trained in log space on the homogeneous subset of regions it owns.
+# - **Local model**: one model per region (20 independent models), trained in log space on its own series and covariates.
 # 
 # Both use `predict_stride=1` / `retrain_stride=OUTPUT_CHUNK_LEN`.
 # Results are compared against the global model in a leaderboard at the end of this section.
@@ -1563,17 +1561,16 @@ for variant, best_params in best_params_by_variant.items():
         chosen_past = full_past_covs
 
     print(f"\n=== Activity-level CV: {name} ===")
-    fp = run_final_test_diff_per_activity(
-        builder, target_for_cv_diff, target_for_cv,
-        region_names, regions_activity, CV_START_VAL,
+    fp = run_final_test_log_per_activity(
+        builder, target_for_cv_log, region_names, regions_activity, CV_START_VAL,
         predict_stride=1, retrain_stride=OUTPUT_CHUNK_LEN,
         past_covs=chosen_past, future_covs=full_fut_covs, is_neural=is_neural,
     )
     activity_cv_long_by_model[name] = collect_predictions_long(target_for_cv, fp, region_names)
 
     print(f"\n=== Local (per-region) CV: {name} ===")
-    fp = run_final_test_diff_per_region(
-        builder, target_for_cv_diff, target_for_cv, CV_START_VAL,
+    fp = run_final_test_log_per_region(
+        builder, target_for_cv_log, CV_START_VAL,
         predict_stride=1, retrain_stride=OUTPUT_CHUNK_LEN,
         past_covs=chosen_past, future_covs=full_fut_covs, is_neural=is_neural,
     )
@@ -1598,17 +1595,16 @@ for variant, best_params in best_params_by_variant.items():
         chosen_past = full_past_covs
 
     print(f"\n=== Activity-level test: {name} ===")
-    fp = run_final_test_diff_per_activity(
-        builder, target_full_diff, target_full,
-        region_names, regions_activity, TEST_START_FRAC,
+    fp = run_final_test_log_per_activity(
+        builder, target_full_log, region_names, regions_activity, TEST_START_FRAC,
         predict_stride=1, retrain_stride=OUTPUT_CHUNK_LEN,
         past_covs=chosen_past, future_covs=full_fut_covs, is_neural=is_neural,
     )
     activity_test_long_by_model[name] = collect_predictions_long(target_full, fp, region_names)
 
     print(f"\n=== Local (per-region) test: {name} ===")
-    fp = run_final_test_diff_per_region(
-        builder, target_full_diff, target_full, TEST_START_FRAC,
+    fp = run_final_test_log_per_region(
+        builder, target_full_log, TEST_START_FRAC,
         predict_stride=1, retrain_stride=OUTPUT_CHUNK_LEN,
         past_covs=chosen_past, future_covs=full_fut_covs, is_neural=is_neural,
     )
@@ -1664,7 +1660,7 @@ print(test_leaderboard_paradigms)
 import json
 from pathlib import Path
 
-RESULTS_DIR = Path("results/diff")
+RESULTS_DIR = Path("results/log")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 def _safe(name):
