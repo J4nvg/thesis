@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "DEFAULT_EWM_HALFLIFE",
+    "BacktestConfig",
     "SeriesConfig",
     "SplitConfig",
     "WindowTransformConfig",
@@ -119,3 +120,32 @@ class SeriesConfig(BaseModel):
     static_cols: list[str] = Field(default_factory=lambda: ["Activity_Level"])
     window: WindowTransformConfig = Field(default_factory=WindowTransformConfig)
     split: SplitConfig = Field(default_factory=SplitConfig)
+
+
+class BacktestConfig(BaseModel):
+    """The expanding-window loop every legacy runner implements.
+
+    The loop is::
+
+        start_idx = int(start_frac * n_total)
+        for t0 in range(start_idx, n_total - horizon + 1, predict_stride):
+            retrain = (t0 - start_idx) % retrain_stride == 0
+
+    ``start_frac`` is a *fraction of the model-space reference series*, not a
+    date: ``cv_start_frac`` (0.875) for the validation stage and
+    ``train_val_end`` (0.7999999999999999, see flag F17) for the test stage.
+    The defaults below are the values every in-scope family uses:
+    ``horizon = OUTPUT_CHUNK_LEN = 7``, ``predict_stride = CV_STRIDE = 1`` and
+    ``retrain_stride = OUTPUT_CHUNK_LEN = 7``.
+
+    ``retrain_stride = None`` means "never retrain" and reproduces
+    ``_chronos2.py::chronos2_rolling_long``, whose fixed predictor is fit once
+    before the loop and never refit.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_frac: float
+    horizon: int = 7
+    predict_stride: int = 1
+    retrain_stride: int | None = 7
