@@ -1,0 +1,129 @@
+# @package _global_
+# Count-regression family: GBDTs and RNNs with Poisson/Tweedie objectives on the
+# LEVEL target.  Legacy sources: `_regression_GBDT.py` (the six GBDT variants)
+# and `_regression_LSTM.py` (the fifteen RNN variants).  Plan sec. 2.3, column
+# "count (gbdt / rnn)".
+defaults:
+  - /backtest: weekly_retrain
+  - /paradigm: global
+  - /tracking: wandb_online
+  - /seeds: default
+  - _self_
+
+name: count
+
+data:
+  # TARGET = "act_drone_strike_on_ua"           (_regression_GBDT.py:99)
+  target: act_drone_strike_on_ua
+  # DATA_FOLDER = "./data"; FIXED/DATASET paths  (_regression_GBDT.py:95-97)
+  fixed_dir: data/fixed
+  dataset_dir: data/dataset
+  # build_panel step 4 drops Activity_Level == 0 ("little"), so 1 is the
+  # minimum tier kept (F24).
+  activity_min_level: 1
+  # remove_low_prevalence(..., ratio=0.1, specific="acled_other_")  (F23/Q6)
+  low_prevalence_ratio: 0.1
+  # `get_engineered_features(..., binarize_target=False)` -- no binary columns.
+  binarize: []
+  panel_variant: regressor
+
+series:
+  split:
+    # TRAIN_FRAC, VAL_FRAC, TEST_FRAC = 0.70, 0.10, 0.20 (_regression_GBDT.py:106)
+    train: 0.70
+    val: 0.10
+    test: 0.20
+
+# Plan sec. 2.3 "Target transform": identity for the count family.
+transform:
+  kind: identity
+
+# src/prevalent_functions.py:230-243 `get_common_kwargs()`, called with its
+# defaults by every in-scope family (F15).
+common_kwargs:
+  lags: 7                                # INPUT_LAGS = 7      (_regression_GBDT.py:103)
+  lags_past_covariates: [-1, -7, -14]    # prevalent_functions.py:233
+  lags_future_covariates: [2, 7]         # (2, output_chunk_len) -- a SPAN (F26)
+  output_chunk_length: 7                 # OUTPUT_CHUNK_LEN = 7 (_regression_GBDT.py:102)
+  output_chunk_shift: 0                  # prevalent_functions.py:236
+  add_encoders:
+    cyclic:
+      future: [month, week, dayofyear, dayofweek, day]   # prevalent_functions.py:239
+
+# One `build_regressor("lightgbm_tweedie")` on level counts, objective tweedie,
+# variance power 1.5, device_type="gpu", top-100; shared with the RNNs
+# (_regression_GBDT.ipynb cell 28; plan sec. 2.3 "Feature selection").
+feature_selection:
+  selector: countreg
+  device: gpu          # device_type="gpu" in the tuned default builder (Q9)
+  num_threads: null    # `num_threads` is COMMENTED OUT in that builder
+  top_k: 100           # get_top_100_from_lgbm -> df_gain.head(100) (prevalent_functions.py:264)
+  cache: true
+  cache_path: features/countreg_saved_sets.pkl   # _regression_GBDT.py:595, _regression_LSTM.py:599
+
+# GBM_VARIANTS (_regression_GBDT.py:118-121) then the RNN lineup of
+# _regression_LSTM.py:1126-1140, in legacy order.  REGRESSORS_TO_RUN
+# (_regression_GBDT.py:124-127) is dead code -- nothing iterates it and
+# golden/results/gbdt/leaderboard.csv has 36 rows = 6 variants x 3 paradigms x
+# 2 splits with no baseline row -- so the count family has no naive/linear/arima
+# entries (F84, F86).
+models:
+  - lightgbm_poisson
+  - lightgbm_tweedie
+  - xgboost_poisson
+  - xgboost_tweedie
+  - catboost_poisson
+  - catboost_tweedie
+  - lstm_poisson_w7
+  - lstm_poisson_w14
+  - lstm_poisson_w28
+  - lstm_tweedie_w7
+  - lstm_tweedie_w14
+  - lstm_tweedie_w28
+  - lstm_w7
+  - lstm_w14
+  - lstm_w28
+  - gru_poisson_w7
+  - gru_poisson_w14
+  - gru_poisson_w28
+  - gru_tweedie_w7
+  - gru_tweedie_w14
+  - gru_tweedie_w28
+
+# Plan sec. 1 "Device policy": the count-family GBDTs ran on CPU.  The strings
+# are the legacy spellings, one per library.
+device:
+  lightgbm: cpu        # device_type="cpu"   (tuned LightGBM branch)
+  xgboost: cpu         # device="cpu"        (tuned XGBoost branch)
+  catboost: CPU        # task_type="CPU"     (tuned CatBoost branch)
+  lstm: auto           # PyTorch Lightning accelerator="auto" in the tuned RNN builder
+  gru: auto
+
+# available_threads = get_available_threads()  (_regression_GBDT.py:86,
+# _regression_LSTM.py:81);
+# all three count GBDT builders pass it (num_threads / n_jobs / thread_count).
+threads: auto
+
+tuning:
+  # Both Optuna objectives pass metric="RMSSE_mean" explicitly
+  # (_regression_GBDT.py:1016 and :1051); the `_score_fold_preds` default
+  # ("MASE_mean", :985) never fires (F39).
+  objective: RMSSE_mean
+  # OPTUNA_N_TRIALS = 50 (_regression_GBDT.py:130, _regression_LSTM.py:125).
+  # The `25 if is_nn` line at _regression_GBDT.py:1085 never fired: that script
+  # tunes GBM_VARIANTS only, and all 15 RNN studies under
+  # golden/converted/tuning/checkpoints_tune have 50 trials.
+  n_trials:
+    gbdt: 50
+    rnn: 50
+  sampler: tpe         # TPESampler(seed=RANDOM_STATE)
+  pruner:
+    kind: median       # MedianPruner(n_warmup_steps=5)  (_regression_GBDT.py:1091)
+    n_warmup_steps: 5
+  direction: minimize
+  timeout_s: null      # OPTUNA_TIMEOUT_S = None (_regression_LSTM.py:127)
+  load_if_exists: true # F11
+
+# No calibration in the count family (plan sec. 2.3, "Calibration": empty).
+calibration:
+  enabled: false

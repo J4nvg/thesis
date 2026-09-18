@@ -1,0 +1,9 @@
+# @package _global_
+# Plan sec. 1 "Seeds"/"Seed list" and sec. 5.4: tune once, evaluate over N seeds.
+seeds:
+  # RANDOM_STATE = 42 -- _regression_GBDT.py:133, _regression_LSTM.py:129,
+  # _diff_regression.py:133, final_hurdle.ipynb cell 1, damage_classifier.ipynb
+  # cell 1. Drives the Optuna TPESampler only.
+  tuning_seed: 42
+  # 42 first, so that the first seed reproduces the thesis.
+  eval_seeds: [42, 1, 2, 3, 4]

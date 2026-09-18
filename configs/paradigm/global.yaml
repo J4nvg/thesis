@@ -1,0 +1,5 @@
+# @package _global_
+paradigms:
+  - name: global
+# One model across all regions. The paradigm every study was tuned under
+# (plan sec. 1 "Seeds"; F14: Activity and Local reuse the Global-tuned params).

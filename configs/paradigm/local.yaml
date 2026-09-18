@@ -1,0 +1,6 @@
+# @package _global_
+paradigms:
+  - name: local
+# One model per region (20 independent models):
+# src/evaluation_tools.py run_expanding_cv_per_region,
+# _regression_GBDT.py:1430, _diff_regression.py:1575.

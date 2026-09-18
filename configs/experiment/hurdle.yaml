@@ -1,0 +1,124 @@
+# @package _global_
+# Hurdle family: a binary event classifier (Self-Paced Ensemble over decision
+# trees) multiplied by a CatBoost Tweedie count head trained on positive-only
+# sample weights.  Legacy source: `final_hurdle.ipynb`.  Plan sec. 2.3, column
+# "hurdle".
+defaults:
+  - /backtest: weekly_retrain
+  - /paradigm: global
+  - /tracking: wandb_online
+  - /seeds: default
+  - _self_
+
+name: hurdle
+
+data:
+  # TARGET_RAW_EVENT_CLASSIFIER = TARGET_REGRESSOR = "act_drone_strike_on_ua"
+  # (final_hurdle.ipynb cell 1).
+  target: act_drone_strike_on_ua
+  fixed_dir: data/fixed        # DATA_FOLDER = "./data" (cell 1)
+  dataset_dir: data/dataset
+  activity_min_level: 1
+  low_prevalence_ratio: 0.1
+  # TARGET_EVENT_CLASSIFIER = "act_drone_strike_on_ua_binary": cell 3 builds a
+  # second panel with `get_engineered_features(..., binarize_target=True)` for
+  # the event classifier; the count head uses the unbinarised one.
+  binarize: [act_drone_strike_on_ua]
+  panel_variant: regressor
+
+series:
+  split:
+    # TRAIN_FRAC, VAL_FRAC, TEST_FRAC = 0.70, 0.10, 0.20 (cell 1)
+    train: 0.70
+    val: 0.10
+    test: 0.20
+
+# Plan sec. 2.3 "Target transform": identity; binary + count.  The composite's
+# `prob` channel is a probability, so a target transform here is rejected (F71).
+transform:
+  kind: identity
+
+# COMMON_KWARGS = get_common_kwargs() (final_hurdle.ipynb cell 9).
+common_kwargs:
+  lags: 7                                # INPUT_LAGS = 7  (cell 1)
+  lags_past_covariates: [-1, -7, -14]    # prevalent_functions.py:233
+  lags_future_covariates: [2, 7]         # a SPAN (F26)
+  output_chunk_length: 7                 # OUTPUT_CHUNK_LEN = 7 (cell 1)
+  output_chunk_shift: 0
+  add_encoders:
+    cyclic:
+      future: [month, week, dayofyear, dayofweek, day]
+
+# Two selections (plan sec. 2.3 "Feature selection"; F27).  Both are
+# library-default LightGBM -- only the shared skeleton, the objective and the
+# seed are passed (final_hurdle.ipynb cell 9) -- and each head's covariates are
+# subset with its own top-100 (cell 11).  `feature_selection` is the count
+# head's, which is the family's headline model.
+feature_selection:
+  selector: zipoisson_regressor   # LightGBMModel(objective="poisson"), fitted
+                                  # with positive-only sample weights (cell 10)
+  device: cpu                     # no device kwarg in that builder; inert here
+  num_threads: null               # no thread kwarg either
+  top_k: 100
+  cache: false                    # this notebook writes no features/*.pkl
+  cache_path: null
+feature_selections:
+  regressor:
+    selector: zipoisson_regressor
+    device: cpu
+    num_threads: null
+    top_k: 100
+    cache: false
+    cache_path: null
+  classifier:
+    selector: zipoisson_classifier   # LightGBMClassifierModel(objective="binary",
+                                     # is_unbalance=True)  (cell 9)
+    device: cpu
+    num_threads: null
+    top_k: 100
+    cache: false
+    cache_path: null
+
+# The three registry entries of `models/classifiers.py`, in notebook order.
+# F7: the hurdle family was never tuned, so none of them has a search space.
+models:
+  - spe_event_classifier           # get_event_classifier() (cell 9)
+  - catboost_tweedie_count_head    # get_count_regressor()  (cell 9)
+  - hurdle                         # the composite the thesis reports
+
+# Plan sec. 1 "Device policy": hurdle CatBoost on CPU.
+device:
+  catboost: CPU   # task_type="CPU" in get_count_regressor (cell 9)
+  hurdle: CPU
+  spe: cpu        # SelfPacedEnsembleClassifier is sklearn -- CPU only
+
+# available_threads = get_available_threads() (cell 1); passed as
+# `n_jobs` to the SPE classifier and `thread_count` to CatBoost.
+threads: auto
+
+# F7: no Optuna study exists for this family.
+tuning: null
+
+# Plan sec. 2.3 "Calibration": sigmoid per horizon, fit on all CV rows and
+# applied in sample for the CV view, out of sample for test (F69); the 5-fold
+# OOF path is diagnostic only; Venn-Abers is also reported.
+calibration:
+  enabled: true
+  method: sigmoid          # CAL_METHOD = "sigmoid"  (cell 22)
+  group_by: horizon        # fit_final_calibrators_per_horizon (cell 20)
+  threshold: 0.5           # _classif_metrics_hurdle(..., threshold=0.5) (cell 14, F70)
+  cv_application: in_sample   # F69: the saved cv_calibrated_* rows are
+                              # calibrated by calibrators fit on those same rows
+  oof_splits: 5            # oof_calibrated_probs(..., n_splits=5) (cell 20)
+  oof_random_state: 42     # random_state=RANDOM_STATE (cell 20)
+  venn_abers: true         # cells 39-44
+
+# F67: the hurdle TEST stage alone computes its naive scales on train+val:
+#   compute_naive_scales([tr.append(vl) for tr, vl in zip(train_target_r,
+#                         val_target_r)], region_names, seasonality=7)
+# (final_hurdle.ipynb cell 26).  Its CV stage uses train only (cell 17), which
+# is the shared default.
+stages:
+  test:
+    naive_scales:
+      fit_on: train_val

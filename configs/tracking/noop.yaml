@@ -1,0 +1,9 @@
+# @package _global_
+# Plan sec. 5.5: `NoopTracker`. Used by tests and by any run that must not
+# touch the network. `mode` is inert for this backend.
+tracking:
+  backend: noop
+  mode: offline
+  project: strikecast
+  entity: null
+  group: null

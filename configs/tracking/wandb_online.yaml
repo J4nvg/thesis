@@ -1,0 +1,9 @@
+# @package _global_
+# Plan sec. 1 "Storage" / sec. 5.5: the local run store is the source of truth
+# and W&B mirrors it. Cluster nodes have internet, so online is the default.
+tracking:
+  backend: wandb
+  mode: online
+  project: strikecast
+  entity: null
+  group: null

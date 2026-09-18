@@ -1,0 +1,6 @@
+# @package _global_
+paradigms:
+  - name: activity
+# One model per activity-level group (1/2/3):
+# src/evaluation_tools.py:593 run_expanding_cv_per_activity,
+# _regression_GBDT.py:1422, _diff_regression.py:1566.

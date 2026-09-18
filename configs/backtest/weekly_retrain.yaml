@@ -1,0 +1,49 @@
+# @package _global_
+# The expanding-window schedule every in-scope family runs, in BOTH stages.
+# Plan sec. 2.3 ("Retrain cadence": every 7 days, predict daily) and sec. 5.2.
+#
+# Identical in all four families, which is why it is a shared group:
+#   count  : _regression_GBDT.py:1179-1185 (CV), :1293-1298 (test)
+#   diff   : _diff_regression.py:1311-1319 (CV; horizon/stride/retrain_stride
+#            default to OUTPUT_CHUNK_LEN/CV_STRIDE/OUTPUT_CHUNK_LEN at :686-690),
+#            :1462-1472 (test)
+#   hurdle : final_hurdle.ipynb cells 17/26 -- run_hurdle_cv / run_final_test
+#            (predict_stride=1, retrain_stride=OUTPUT_CHUNK_LEN)
+#   damage : damage_classifier.ipynb cells 17/26 -- run_damage_cv(predict_stride=1,
+#            retrain_stride=OUTPUT_CHUNK_LEN) / run_final_test(...)
+stages:
+  cv:
+    # CV_START_VAL, returned by get_covs_and_encodings; _regression_GBDT.py:1182,
+    # _diff_regression.py:1315. Re-derived from the split as train/(train+val).
+    start: cv_start_frac
+    horizon: 7          # OUTPUT_CHUNK_LEN = 7        (_regression_GBDT.py:102)
+    predict_stride: 1   # CV_STRIDE = 1               (_regression_GBDT.py:107)
+    retrain_stride: 7   # retrain_stride=OUTPUT_CHUNK_LEN (_regression_GBDT.py:1185)
+    # F81: the Activity and Local CV wrappers delegate to `run_final_test`
+    # (src/evaluation_tools.py:610 "Internally calls run_final_test"), so only
+    # the Global CV path takes the 200-sample median of `run_expanding_cv`.
+    adapters:
+      global: for_cv
+      activity: for_test
+      local: for_test
+    # compute_naive_scales(train_target, ...) -- _regression_GBDT.py:719,
+    # _diff_regression.py:603, final_hurdle.ipynb cell 17.
+    naive_scales:
+      fit_on: train
+      seasonality: 7    # seasonality=7
+  test:
+    # TEST_START_FRAC = TRAIN_VAL_END (_regression_GBDT.py:1277,
+    # _diff_regression.py:1444).
+    start: train_val_end
+    horizon: 7          # OUTPUT_CHUNK_LEN = 7        (_diff_regression.py:106)
+    predict_stride: 1   # predict_stride = 1          (_regression_GBDT.py:1297)
+    retrain_stride: 7   # retrain_stride=OUTPUT_CHUNK_LEN (_regression_GBDT.py:1298)
+    adapters:
+      global: for_test
+      activity: for_test
+      local: for_test
+    # Overridden to `train_val` by the hurdle family only (F67); see
+    # configs/experiment/hurdle.yaml.
+    naive_scales:
+      fit_on: train
+      seasonality: 7

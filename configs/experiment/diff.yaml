@@ -1,0 +1,116 @@
+# @package _global_
+# Differenced-target family: the same panel and schedule as `count`, but every
+# learner trains on the FIRST DIFFERENCE of the target and predictions are
+# re-anchored on the last actual level.  Legacy source: `_diff_regression.py`.
+# The ARIMA baseline the thesis reports (Table 4, local, p=7, d=1, q=1) was
+# produced by this run, so it lives here and not in `count` (plan sec. 1
+# "Scope", sec. 2.1, F13).
+defaults:
+  - /backtest: weekly_retrain
+  - /paradigm: global
+  - /tracking: wandb_online
+  - /seeds: default
+  - _self_
+
+name: diff
+
+data:
+  target: act_drone_strike_on_ua   # TARGET  (_diff_regression.py:104)
+  fixed_dir: data/fixed            # _diff_regression.py:100-102
+  dataset_dir: data/dataset
+  activity_min_level: 1
+  low_prevalence_ratio: 0.1
+  binarize: []
+  panel_variant: regressor
+
+series:
+  split:
+    # TRAIN_FRAC, VAL_FRAC, TEST_FRAC = 0.70, 0.10, 0.20 (_diff_regression.py:110)
+    train: 0.70
+    val: 0.10
+    test: 0.20
+
+# Plan sec. 2.3 "Target transform": first difference, anchor on the last actual
+# (`_diff_to_level`, _diff_regression.py).
+transform:
+  kind: diff
+
+# Identical to the count family: `get_common_kwargs()` with its defaults
+# (src/prevalent_functions.py:230-243, called at _diff_regression.py:253).
+common_kwargs:
+  lags: 7                                # INPUT_LAGS = 7      (_diff_regression.py:107)
+  lags_past_covariates: [-1, -7, -14]    # prevalent_functions.py:233
+  lags_future_covariates: [2, 7]         # (2, output_chunk_len) -- a SPAN (F26)
+  output_chunk_length: 7                 # OUTPUT_CHUNK_LEN = 7 (_diff_regression.py:106)
+  output_chunk_shift: 0
+  add_encoders:
+    cyclic:
+      future: [month, week, dayofyear, dayofweek, day]
+
+# Its own selection: LightGBM with objective "regression" on CPU with 4 threads,
+# fitted on the LEVEL target while the models train on differences (plan
+# sec. 2.3 "Feature selection"; F29, Q8).
+feature_selection:
+  selector: diffreg
+  device: cpu          # device_type="cpu"
+  num_threads: 4       # available_threads = 4, hard-coded (_diff_regression.py:90)
+  top_k: 100
+  cache: true
+  cache_path: features/diffreg_saved_sets.pkl   # _diff_regression.py:487
+
+# GBM_VARIANTS (_diff_regression.py:120), NN_VARIANTS (:1201), LINEAR_VARIANTS
+# (:121) and REGRESSORS_TO_RUN (:123-128).  Unlike the count family these
+# baselines really did run and are persisted (F84).
+models:
+  - lightgbm
+  - xgboost
+  - catboost
+  - lstm_w7
+  - lstm_w14
+  - lstm_w28
+  - gru_w7
+  - gru_w14
+  - gru_w28
+  - linear             # LinearRegressionModel, untuned floor (_diff_regression.py:360-365)
+  # ARIMA(p=7, d=0, q=1) on the DIFFERENCES == ARIMA(7,1,1) on levels; one model
+  # per region, rebuilt inside every prediction step, with a NaiveMean fallback
+  # on any exception (F5; tests/legacy_ref/diff_runners.py:138, 221, 309).
+  - name: arima
+    fallback: naive_mean
+  - naive_last         # NAIVE_MODELS (_diff_regression.py:117)
+  - naive_weekly
+
+# Plan sec. 1 "Device policy": diff-branch XGBoost and CatBoost on GPU,
+# LightGBM on CPU.  Legacy spellings, one per library.
+device:
+  lightgbm: cpu        # device_type="cpu" + num_threads    (tuned LightGBM branch)
+  xgboost: cuda        # device="cuda", n_jobs COMMENTED OUT
+  catboost: GPU        # task_type="GPU", thread_count COMMENTED OUT
+  lstm: auto
+  gru: auto
+  linear: cpu
+  arima: cpu
+  naive: cpu
+
+# available_threads = 4, hard-coded in this script -- it does NOT call
+# get_available_threads() (_diff_regression.py:90).  Only the LightGBM branch
+# passes it; the XGBoost and CatBoost branches have it commented out.
+threads: 4
+
+tuning:
+  # _diff_regression.py:1146 and :1174 both pass metric="RMSSE_mean"; the
+  # `_score_fold_preds` default is already "RMSSE_mean" here (:1120) (F39).
+  objective: RMSSE_mean
+  n_trials:
+    gbdt: 50           # OPTUNA_N_TRIALS = 50  (_diff_regression.py:130)
+    rnn: 50            # n_trials = OPTUNA_N_TRIALS for every variant (:1215)
+  sampler: tpe
+  pruner:
+    kind: median       # MedianPruner(n_warmup_steps=5)  (_diff_regression.py:1221)
+    n_warmup_steps: 5
+  direction: minimize
+  timeout_s: null      # OPTUNA_TIMEOUT_S = None  (_diff_regression.py:131)
+  load_if_exists: true
+
+calibration:
+  enabled: false       # plan sec. 2.3 "Calibration": empty for the diff family

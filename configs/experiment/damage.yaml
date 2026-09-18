@@ -1,0 +1,107 @@
+# @package _global_
+# Damage family: one Self-Paced-Ensemble binary classifier per infrastructure
+# type, each predicting P(damage of that type).  Legacy source:
+# `damage_classifier.ipynb`.  Plan sec. 2.3 and sec. 5.2
+# ("MultiTargetClassifierForecaster returns one channel per damage key").
+defaults:
+  - /backtest: weekly_retrain
+  - /paradigm: global
+  - /tracking: wandb_online
+  - /seeds: default
+  - _self_
+
+name: damage
+
+data:
+  # The damage variant has no single target column: the legacy helper
+  # `get_engineered_features_damageclassifiers` takes `targets_cols` and returns
+  # one frame per target, and `build_panel_legacy_damage` passes `target=""`
+  # with `validate_target=False` (Q7).  The lineup lives in `binarize`.
+  target: ""
+  fixed_dir: data/fixed        # DATA_FOLDER = "./data" (cell 1)
+  dataset_dir: data/dataset
+  activity_min_level: 1
+  low_prevalence_ratio: 0.1
+  # all_targets = [f"act_drone_infra_ua_{x}_{y}" for y in intentions_oi
+  #                for x in infra_types] with
+  # infra_types = ['health','education','residential','energy'] and
+  # intentions_oi = ['intent']   (damage_classifier.ipynb cell 1).
+  # Each is binarised to "<col>_binary" AFTER the interaction/GDELT steps (Q4).
+  binarize:
+    - act_drone_infra_ua_health_intent
+    - act_drone_infra_ua_education_intent
+    - act_drone_infra_ua_residential_intent
+    - act_drone_infra_ua_energy_intent
+  panel_variant: damage        # binarise late, interactions on, no target check
+
+series:
+  split:
+    # TRAIN_FRAC, VAL_FRAC, TEST_FRAC = 0.70, 0.10, 0.20 (cell 1)
+    train: 0.70
+    val: 0.10
+    test: 0.20
+
+# Plan sec. 2.3: identity.  Rejected otherwise, because the channels are
+# probabilities (F71).
+transform:
+  kind: identity
+
+# COMMON_KWARGS = get_common_kwargs() (damage_classifier.ipynb cell 10).
+common_kwargs:
+  lags: 7                                # INPUT_LAGS = 7  (cell 1)
+  lags_past_covariates: [-1, -7, -14]    # prevalent_functions.py:233
+  lags_future_covariates: [2, 7]         # a SPAN (F26)
+  output_chunk_length: 7                 # OUTPUT_CHUNK_LEN = 7 (cell 1)
+  output_chunk_shift: 0
+  add_encoders:
+    cyclic:
+      future: [month, week, dayofyear, dayofweek, day]
+
+# The damage family reuses the hurdle classifier selection verbatim:
+# `get_feature_selector_classifier` is LightGBMClassifierModel(objective="binary",
+# is_unbalance=True, random_state=RANDOM_STATE) (cell 10), run once per damage
+# key (plan sec. 2.3, F27).
+feature_selection:
+  selector: zipoisson_classifier
+  device: cpu        # no device kwarg in that builder; inert here
+  num_threads: null  # no thread kwarg either
+  top_k: 100
+  cache: false       # this notebook writes no features/*.pkl
+  cache_path: null
+  per_key: true      # one selection per damage key
+
+# The two registry entries of `models/classifiers.py` for this family.
+# F7: never tuned.
+models:
+  - spe_damage_classifier   # get_damage_classifier() (cell 10)
+  - damage                  # the per-key composite
+
+# Global only: `damage_classifier.ipynb` defines `run_damage_cv` (cell 17) and
+# `run_final_test` (cell 26) and no per-activity or per-region wrapper, so the
+# thesis reports no Activity/Local numbers for this family.
+paradigms:
+  - name: global
+
+device:
+  spe: cpu       # SelfPacedEnsembleClassifier is sklearn -- CPU only
+  damage: cpu
+
+# available_threads = get_available_threads() (cell 1), passed as `n_jobs` to
+# the SPE classifier.
+threads: auto
+
+# F7: no Optuna study exists for this family.
+tuning: null
+
+# Plan sec. 2.3: sigmoid per horizon, fit on all CV rows, applied in sample for
+# the CV view and out of sample for test (F69).  No Venn-Abers here: the damage
+# notebook has no venn-abers cell, unlike `final_hurdle.ipynb`.
+calibration:
+  enabled: true
+  method: sigmoid          # CAL_METHOD = "sigmoid"  (cell 24)
+  group_by: horizon        # fit_final_calibrators_per_horizon (cell 22)
+  threshold: 0.5           # _classif_metrics(..., threshold=0.5) (F70)
+  cv_application: in_sample
+  oof_splits: 5            # oof_calibrated_probs(..., n_splits=5) (cell 22)
+  oof_random_state: 42     # random_state=RANDOM_STATE (cell 22)
+  venn_abers: false
