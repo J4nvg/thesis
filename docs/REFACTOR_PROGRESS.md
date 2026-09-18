@@ -633,3 +633,19 @@ owner `evaluation/aggregate.py`. Nothing committed yet (40 changed/untracked pat
    damage pinned to global paradigm; `summary.md` renderer for `strikecast report`;
    block length / DM correction choices in `evaluation/comparison.py`; F100-F117
    flag numbers collide between `models/rnn.py` and `evaluation/calibration.py`.
+
+## Decisions by Jan, 2026-09-18 (after round 1)
+
+- Round-1 work committed as `0f468e2`.
+- Count experiment has **no baselines**: the registry follows the legacy scripts; Appendix B of the plan is to be corrected, not the code.
+- Hurdle `per_region` tie-order golden failures: compare order-insensitively in the test and record a methodology flag. No tie-break added to the pipeline.
+- Round 2 priorities: everything (E/F golden verification, P5 hurdle+damage, P5 Chronos-2, W&B wiring + SLURM), but full experiments take days, so golden verification runs on a cheap deterministic subset only.
+
+## Work streams launched 2026-09-18, round 2 (Opus agents, disjoint files)
+
+| Stream | Owns | Status |
+|---|---|---|
+| F. Level E/F golden verification on a cheap subset + hurdle tie fix + Appendix B fix | `scripts/import_golden_params.py`, `tests/golden/test_pipeline_equality.py`, `tests/golden/test_metrics_equality.py`, `docs/REFACTOR_PLAN.md` (§4 flag, Appendix B), `pipeline/run_stage.py` only for bugs it finds | in progress |
+| G. P5 hurdle + damage through the pipeline | `pipeline/composite_stage.py` (new), `pipeline/data_stage.py` (two-panel build), `models/hurdle.py`, `tests/unit/test_composite_stage.py`, `tests/golden/test_hurdle_pipeline_equality.py` | in progress |
+| H. P5 Chronos-2 adapter | `models/chronos.py`, `data/autogluon.py`, `configs/experiment/chronos2.yaml`, `envs/autogluon/**`, `tests/unit/test_chronos*.py` | in progress |
+| I. W&B wiring + SLURM templates | `pipeline/context.py`, `pipeline/tune_stage.py` (tracker calls), `tuning/optuna_runner.py` (callbacks arg), `store/run_store.py` (wandb id in env), `scripts/slurm/**`, `configs/hydra/**`, `tests/unit/test_tracking_wiring.py` | in progress |
