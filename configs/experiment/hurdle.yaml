@@ -119,7 +119,8 @@ device:
 
 # available_threads = get_available_threads() (cell 1); passed as
 # `n_jobs` to the SPE classifier and `thread_count` to CatBoost.
-threads: auto
+# Pinned to 4 (2026-09-27): the value it returned in the thesis run (audit B5).
+threads: 4
 
 # F7: no Optuna study exists for this family.
 tuning: null

@@ -105,7 +105,8 @@ device:
 
 # available_threads = get_available_threads() (cell 1), passed as `n_jobs` to
 # the SPE classifier.
-threads: auto
+# Pinned to 16 (2026-09-27): the value it returned in the thesis run (audit B5).
+threads: 16
 
 # F7: no Optuna study exists for this family.
 tuning: null

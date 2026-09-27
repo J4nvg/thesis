@@ -231,7 +231,7 @@ def test_gpu_and_cpu_resource_classes() -> None:
     cpu = submit_all.sbatch_args(
         by["test:count:lightgbm_poisson:global:s42"], {}, submit_all.Options()
     )
-    assert "--cpus-per-task=48" in cpu and not any(a.startswith("--gres") for a in cpu)
+    assert "--cpus-per-task=16" in cpu and not any(a.startswith("--gres") for a in cpu)
 
 
 def test_a_job_class_above_the_threshold_goes_to_gpuextended() -> None:

@@ -411,13 +411,14 @@ def test_the_seed_policy_is_tune_once_evaluate_over_five(name: str, configs) -> 
 
 
 def test_the_thread_count_is_the_legacy_one(configs) -> None:
-    """The three count/hurdle/damage scripts call ``get_available_threads()``
-    (_regression_GBDT.py:86); ``_diff_regression.py:90`` hard-codes 4."""
-    assert configs["diff"].threads == 4
-    assert configs["diff"].resolved_threads == 4
-    for name in ("count", "hurdle", "damage"):
-        assert configs[name].threads == "auto"
-        assert configs[name].resolved_threads >= 1
+    """``_diff_regression.py:90`` hard-codes 4. The count/hurdle/damage scripts call
+    ``get_available_threads()`` (_regression_GBDT.py:86); the configs pin what that
+    returned in the thesis runs (saved notebook outputs, audit B5), so a 64-CPU
+    cluster node does not change the thread count."""
+    expected = {"diff": 4, "count": 12, "hurdle": 4, "damage": 16}
+    for name, n in expected.items():
+        assert configs[name].threads == n
+        assert configs[name].resolved_threads == n
 
 
 def test_the_panel_variant_and_binarisation_are_per_family(configs) -> None:

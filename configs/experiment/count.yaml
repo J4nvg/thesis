@@ -125,7 +125,11 @@ device:
 # available_threads = get_available_threads()  (_regression_GBDT.py:86,
 # _regression_LSTM.py:81);
 # all three count GBDT builders pass it (num_threads / n_jobs / thread_count).
-threads: auto
+# Pinned to 12 (2026-09-27): the value that call returned in the thesis runs
+# (Colab, saved notebook output; audit B5), not os.cpu_count() of whatever node
+# runs the job (64 on the cluster -> LightGBM thread thrashing, ~25x slower).
+# LightGBM/CatBoost predictions are bit-identical across 4/12/15/64 (B5).
+threads: 12
 
 tuning:
   # Both Optuna objectives pass metric="RMSSE_mean" explicitly

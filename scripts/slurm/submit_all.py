@@ -39,7 +39,8 @@ What is decided where
 * **Resources** come from the model's device: GPU jobs
   ``-p GPU --gres=gpu:1 --gres-flags=disable-binding -c 8`` (``gres.conf`` binds
   both GPUs to cores 0-1, so ``-c > 4`` needs ``disable-binding``); CPU jobs
-  ``-p GPU -c 48`` without gres. Two GPU jobs plus one CPU job fit a 64-CPU node.
+  ``-p GPU -c 16`` without gres (the configs pin 4-12 threads). Two GPU jobs plus
+  three CPU jobs fit a 64-CPU node.
 * **Wall time** from :data:`TIME_TABLE` (evidence in each entry), overridden by
   ``configs/cluster/time_table.json`` when present (written by ``timings`` from
   the ``--benchmark`` pilot) or ``--time-table``. A job class whose time exceeds
@@ -115,7 +116,9 @@ RETRAIN_STRIDE = 7
 #: SLURM resources per class. `gpu` also gets `--gres-flags=disable-binding`.
 RESOURCES: dict[str, dict[str, Any]] = {
     "gpu": {"cpus": 8, "mem": "40G", "gres": "gpu:1"},
-    "cpu": {"cpus": 48, "mem": "96G", "gres": None},
+    # 16 CPUs: the GBDT families pin 4-12 threads (count 12, diff/hurdle 4), so
+    # 16 leaves headroom and lets ~3 CPU jobs share a node with 2 GPU jobs.
+    "cpu": {"cpus": 16, "mem": "48G", "gres": None},
     "cpu_small": {"cpus": 8, "mem": "32G", "gres": None},
 }
 
