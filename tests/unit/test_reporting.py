@@ -28,6 +28,14 @@ HAVE_DATA = (DATA / "dataset" / "master_combined_timeseries.parquet").is_file()
 
 needs_results = pytest.mark.skipif(not HAVE_RESULTS, reason="results/ not available")
 needs_data = pytest.mark.skipif(not HAVE_DATA, reason="data/ not available")
+# golden/ is git-ignored (absent in CI); the tuning table reads the converted studies.
+HAVE_GOLDEN = (REPO / "golden" / "converted").is_dir()
+# F2/F3 (choropleths) need the optional `figures` extra (geopandas).
+try:
+    import geopandas  # noqa: F401
+    HAVE_GEOPANDAS = True
+except ImportError:
+    HAVE_GEOPANDAS = False
 
 
 # --------------------------------------------------------------------------- #
@@ -57,6 +65,8 @@ def test_legacy_every_item_generated_or_static(legacy_out: Path) -> None:
     by_status: dict[str, list[str]] = {}
     for item in manifest["items"]:
         by_status.setdefault(item["status"], []).append(item["id"])
+    if not HAVE_GEOPANDAS:  # the maps are skipped with a reason, not failed
+        assert set(by_status.pop("skipped", [])) <= {"F2", "F3"}, by_status
     assert set(by_status) <= {"generated", "static"}, by_status
     assert sorted(by_status["static"]) == sorted(
         ["F1", "F8", "F9", "F10", "F11", "F22", "T1", "T7", "T11"]
@@ -220,6 +230,7 @@ def test_data_tables_match_thesis(legacy_out: Path) -> None:
     assert (round(n["STLFSraw"], 2), round(n["STLFSdiff"], 2)) == (0.38, 0.36)
 
 
+@pytest.mark.skipif(not HAVE_GOLDEN, reason="golden/ not available (git-ignored)")
 def test_tuning_best_all_matches_thesis(legacy_out: Path) -> None:
     tex = (legacy_out / "tab_tuning_best_all.tex").read_text()
     # main.tex:1418-1452, value for value

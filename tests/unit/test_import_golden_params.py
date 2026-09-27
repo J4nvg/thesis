@@ -64,6 +64,8 @@ def test_the_real_cell_56_holds_all_six_count_gbdts(importer) -> None:
     assert cell["xgboost_poisson"]["reg_lambda"] == 0.0036107454705973092
     assert cell["lightgbm_tweedie"]["tweedie_variance_power"] == 1.3329833121584336
     # the anchor: cell 56's lightgbm_poisson IS the converted golden study
+    if not (GOLDEN / "converted").is_dir():
+        pytest.skip("golden/ is git-ignored and not present (e.g. CI); anchor not checked")
     assert importer.check_cell56_anchor(cell, GOLDEN) == []
 
 

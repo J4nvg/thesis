@@ -471,6 +471,8 @@ def test_fine_tuned_builds_the_winning_configuration() -> None:
 
 
 def test_the_defaults_are_the_stored_best_params(repo_root) -> None:
+    if not (repo_root / "golden/checkpoints/chronos2_best/best_params.json").is_file():
+        pytest.skip("golden/ is git-ignored and not present (e.g. CI)")
     import json
 
     stored = json.loads(
@@ -510,6 +512,8 @@ def test_search_space_is_the_legacy_two_knobs() -> None:
 
 
 def test_the_optuna_trials_all_lie_inside_the_search_space(repo_root) -> None:
+    if not (repo_root / "golden/results/chronos2/optuna_trials.csv").is_file():
+        pytest.skip("golden/ is git-ignored and not present (e.g. CI)")
     trials = pd.read_csv(repo_root / "golden/results/chronos2/optuna_trials.csv")
     assert len(trials) == 12
     assert trials["params_fine_tune_lr"].between(1e-6, 1e-4).all()
