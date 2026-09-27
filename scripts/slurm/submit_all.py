@@ -353,9 +353,11 @@ def build_dag(
     run_flags: list[str] = []
     tune_flags: list[str] = []
     if opts.benchmark:
-        run_flags = [
-            "--allow-default-params", "--max-folds", str(opts.benchmark_windows * RETRAIN_STRIDE),
-        ]
+        # No --allow-default-params: the pilot's cv/test wait for their own 2-trial tune
+        # and use its params, i.e. the exact code path of the real run. (Default params
+        # pick the legacy default RNN trainer preset, precision="32-true", which the
+        # thesis never used and which fails on float64 series.)
+        run_flags = ["--max-folds", str(opts.benchmark_windows * RETRAIN_STRIDE)]
         tune_flags = ["--n-trials", str(opts.benchmark_trials)]
 
     # -- tune / cv / test --------------------------------------------------------
@@ -366,7 +368,7 @@ def build_dag(
                 name = run_node_name(job)
                 upstream = env_ready(job.env) + dep(f"featsel:{exp}")
                 after_ok = list(upstream)
-                if stage in ("cv", "test") and not opts.benchmark:
+                if stage in ("cv", "test"):
                     after_ok += dep(f"tune:{exp}:{job.model}")
                 if stage == "test":  # a composite's calibrators come from its CV (C18)
                     after_ok += dep(f"cv:{exp}:{job.model}:{job.paradigm}")

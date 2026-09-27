@@ -200,17 +200,20 @@ def test_later_seeds_depend_on_jobs_still_queued_from_an_earlier_submission() ->
     assert "report:count" not in by  # stage list is test only
 
 
-def test_benchmark_runs_truncated_pilots_without_tune_dependencies() -> None:
+def test_benchmark_runs_truncated_pilots_on_their_own_tuned_params() -> None:
     opts = submit_all.options_from(submit_all._parser().parse_args(["--benchmark"]))
     assert opts.store_root == "runs_benchmark" and opts.tracking == "noop"
     assert set(opts.stages) <= {"setup", "featsel", "tune", "cv", "test"}
     opts.experiments = ["count", "hurdle", "chronos2"]
     by, _ = dag(opts)
     test = by["test:count:lightgbm_poisson:global:s42"]
-    assert "tune:count:lightgbm_poisson" not in test.after_ok
-    flags = test.argv[test.argv.index("--allow-default-params"):]
-    assert flags[:3] == ["--allow-default-params", "--max-folds", "14"]
-    assert flags[3:5] == ["--store-root", "runs_benchmark"]
+    # the pilot's test waits for its own 2-trial tune (the real run's code path);
+    # default params would select the unused legacy RNN preset (precision 32-true)
+    assert "tune:count:lightgbm_poisson" in test.after_ok
+    assert "--allow-default-params" not in test.argv
+    flags = test.argv[test.argv.index("--max-folds"):]
+    assert flags[:2] == ["--max-folds", "14"]
+    assert flags[2:4] == ["--store-root", "runs_benchmark"]
     assert by["tune:count:lightgbm_poisson"].argv[-5:-3] == ["--n-trials", "2"]
     assert "cv:hurdle:hurdle:global" in by["test:hurdle:hurdle:global:s42"].after_ok
     assert not any(n.startswith(("report", "importance", "verify", "figures")) for n in by)
