@@ -1273,7 +1273,8 @@ def cmd_submit(argv: list[str]) -> int:
                 Options(**{**asdict(opts), "force": True, "stages": ["test"], "seeds": [42]})
             )[0])
 
-    queued = {} if args.dry_run else queued_from_earlier(opts.store_root)
+    # read-only (squeue), so the dry run shows exactly what a real submit would add
+    queued = queued_from_earlier(opts.store_root)
     nodes = build_dag(
         opts, matrices, importance_jobs=importance, verify_groups=verify,
         need_setup=need_setup, queued=queued,
