@@ -43,6 +43,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
 from strikecast.backtest.engine import ExpandingWindowBacktest
 from strikecast.backtest.hooks import PruningHook
 from strikecast.backtest.predictions import PredictionSet
@@ -119,10 +121,23 @@ class _Settings:
         # field and lets `spec.n_trials` win over it, which is the legacy order.
         self.n_trials: int | None = tuning.n_trials.get(kind)
         self.timeout = None if tuning.timeout_s is None else float(tuning.timeout_s)
-        self.catch: tuple[type[BaseException], ...] = ()
+        # Only a diverged trial is caught (FAIL, study continues); see NonFiniteForecast.
+        self.catch: tuple[type[BaseException], ...] = (NonFiniteForecast,)
         self.gc_after_trial = False
         self.show_progress_bar = False
         self.n_jobs = 1
+
+
+class NonFiniteForecast(ValueError):
+    """A trial's forecasts contain NaN/inf (a diverged booster, e.g. a Tweedie
+    XGBoost with a high learning rate and variance power near 2).
+
+    Legacy tuned with ``catch=()``, so such a trial would have aborted the whole
+    study; the thesis runs simply never sampled one. Catching exactly this
+    exception marks the ONE trial as FAIL (it still counts towards the trial
+    budget, C22) and lets the study continue. Every other exception still
+    aborts the study, as in legacy.
+    """
 
 
 def _score_fn(
@@ -147,6 +162,12 @@ def _score_fn(
 
     def _score(cumulative: dict[str, list[list[Any]]]) -> float:
         preds = PredictionSet.from_fold_preds(level_targets, cumulative, region_names)
+        y_pred = preds.frame["y_pred"].to_numpy(dtype=float)
+        if not np.isfinite(y_pred).all():
+            bad = int((~np.isfinite(y_pred)).sum())
+            raise NonFiniteForecast(
+                f"{bad} of {y_pred.size} forecasts are NaN/inf; failing this trial"
+            )
         views = evaluate(
             preds,
             mae_scales,

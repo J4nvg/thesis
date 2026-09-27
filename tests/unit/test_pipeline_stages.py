@@ -448,6 +448,55 @@ def test_tune_model_writes_best_params_and_is_not_repeated(cfg, data, store, mon
     assert again.skipped and "best_params.json" in again.reason
 
 
+def test_a_diverged_trial_fails_alone_and_the_study_continues(
+    cfg, data, store, monkeypatch
+) -> None:
+    """Cluster job 64441: a Tweedie XGBoost trial produced NaN forecasts and the
+    NaN reached sklearn's deviance, aborting the whole study. Only that trial
+    must fail; it still counts towards the trial budget."""
+    optuna = pytest.importorskip("optuna")
+    spec = _tunable_linear_spec()
+    monkeypatch.setattr(tune_stage, "get_spec", lambda name, exp=None: spec)
+
+    real = tune_stage.PredictionSet.from_fold_preds
+    calls = {"n": 0}
+
+    class _NaNOnce:
+        @staticmethod
+        def from_fold_preds(*args, **kwargs):
+            preds = real(*args, **kwargs)
+            calls["n"] += 1
+            if calls["n"] == 1:  # the first score of the first trial
+                preds.frame.loc[preds.frame.index[0], "y_pred"] = float("nan")
+            return preds
+
+    monkeypatch.setattr(tune_stage, "PredictionSet", _NaNOnce)
+    outcome = tune_stage.tune_model(cfg, "linear", data, store=store, n_trials=2)
+    assert outcome.best_value is not None
+
+    storage = store.tuning_dir(cfg.name, "linear") / "optuna.sqlite3"
+    study = optuna.load_study(study_name="linear", storage=f"sqlite:///{storage}")
+    states = [t.state for t in study.trials]
+    assert states.count(optuna.trial.TrialState.FAIL) == 1
+    assert states.count(optuna.trial.TrialState.COMPLETE) == 1
+
+
+def test_other_trial_errors_still_abort_the_study(cfg, data, store, monkeypatch) -> None:
+    """Only non-finite forecasts are caught; anything else aborts, as legacy did."""
+    pytest.importorskip("optuna")
+    spec = _tunable_linear_spec()
+    monkeypatch.setattr(tune_stage, "get_spec", lambda name, exp=None: spec)
+
+    class _Boom:
+        @staticmethod
+        def from_fold_preds(*args, **kwargs):
+            raise KeyError("not a divergence")
+
+    monkeypatch.setattr(tune_stage, "PredictionSet", _Boom)
+    with pytest.raises(KeyError):
+        tune_stage.tune_model(cfg, "linear", data, store=store, n_trials=2)
+
+
 def test_a_model_without_a_search_space_is_not_tunable(cfg, data, store) -> None:
     outcome = tune_stage.tune_model(cfg, "naive_last", data, store=store)
     assert outcome.skipped and outcome.reason == "not tunable"
