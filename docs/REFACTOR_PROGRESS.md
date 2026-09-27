@@ -1326,3 +1326,19 @@ fold-level resume deliberately not implemented (long jobs route to GPUExtended; 
 - Suite: 1498 passed, 13 skipped, 1 xfailed; ruff clean.
 - Remaining: first cluster run (`--setup-only`, `--benchmark`), `main.tex` `\input` switch-over,
   thesis/paper text fixes (CONSOLIDATED §5), W&B gaps 1/2/3/5 in `docs/WANDB.md`.
+
+### First cluster runs — 2026-09-27
+
+Pilot (`--benchmark`, runs_benchmark) completed; `configs/cluster/time_table.json` committed
+(3e35913; largest request 16.5 h). Real seed-42 run submitted 17:15 into runs_publication
+(`--wandb-project thesis-publication`). Fixes found by running on the cluster, all pushed:
+- c54eb8d benchmark cv/test wait for their own 2-trial tune (default params picked the legacy
+  count-RNN default preset, precision 32-true, which fails on float64 series).
+- c699cd9 threads pinned to the thesis values (count 12, hurdle 4, damage 16; `auto` gave 64 threads
+  on shared nodes, ~25x slower); CPU jobs `-c 16`.
+- e3e261b a trial with NaN/inf forecasts is a FAIL trial, the study continues (count xgboost_tweedie
+  trial 20 diverged: lr 0.13, power 1.895).
+- deb8dbd / 512f309 a resubmit never re-emits jobs still queued (it had re-emitted 110; they were
+  cancelled); `status` merges all manifests of a store; `--dry-run` respects the queue.
+Still to check at the end: `report:count`/`figures` may run before the resubmitted xgboost_tweedie
+tests finish -> rerun `--stages report,figures --force` if the count leaderboard lacks it.
