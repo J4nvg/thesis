@@ -347,6 +347,47 @@ def test_setup_needed_follows_the_lock_hash(monkeypatch, tmp_path) -> None:
 # --------------------------------------------------------------------------- #
 # status
 # --------------------------------------------------------------------------- #
+def test_a_resubmit_never_re_emits_jobs_still_queued_from_an_earlier_submission() -> None:
+    """2026-09-27: after one failed tune the resubmit re-emitted 110 live jobs."""
+    opts = submit_all.Options(stages=["tune", "test"], experiments=["count"])
+    m = {"count": [
+        run_job("count", "lightgbm_poisson", None, "tune"),
+        run_job("count", "lightgbm_poisson", "global", "test"),
+        run_job("count", "xgboost_tweedie", None, "tune"),
+        run_job("count", "xgboost_tweedie", "global", "test"),
+    ]}
+    queued = {"tune:count:lightgbm_poisson": "700", "test:count:lightgbm_poisson:global:s42": "701"}
+    by, _ = dag(opts, matrices=m, need_setup={}, importance_jobs={}, verify_groups={},
+                queued=queued)
+    assert set(by) == {"tune:count:xgboost_tweedie", "test:count:xgboost_tweedie:global:s42"}
+    assert by["test:count:xgboost_tweedie:global:s42"].after_ok == ["tune:count:xgboost_tweedie"]
+
+
+def test_status_merges_submissions_and_ignores_cancelled_duplicates(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    monkeypatch.setattr(submit_all, "REPO", tmp_path)
+    directory = tmp_path / "logs" / "submissions"
+    directory.mkdir(parents=True)
+    common = {"git": {"commit": "abc"}, "options": {"store_root": "store"}}
+    first = [{"name": "tune:count:a", "stage": "tune", "job_id": "10", "log": "logs/x-%j.out"}]
+    second = [
+        {"name": "tune:count:a", "stage": "tune", "job_id": "20", "log": "logs/x-%j.out"},
+        {"name": "tune:count:b", "stage": "tune", "job_id": "21", "log": "logs/x-%j.out"},
+    ]
+    (directory / "20260927T100000Z.json").write_text(json.dumps({**common, "jobs": first}))
+    (directory / "20260927T110000Z.json").write_text(json.dumps({**common, "jobs": second}))
+    live = {"10": {"state": "RUNNING", "reason": "None", "elapsed": "1:00", "node": "n1"},
+            "21": {"state": "PENDING", "reason": "Priority", "elapsed": "0:00", "node": ""}}
+    monkeypatch.setattr(submit_all, "squeue_ids", lambda: live)
+    assert submit_all.cmd_status([]) == 0
+    out = capsys.readouterr().out
+    assert "(+1 earlier for this store)" in out
+    assert "running" in out and "10  tune:count:a" in out  # the original, not cancelled 20
+    assert "21  tune:count:b" in out
+    assert "failed" not in out
+
+
 def _manifest(tmp_path, jobs):
     directory = tmp_path / "logs" / "submissions"
     directory.mkdir(parents=True)

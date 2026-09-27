@@ -312,6 +312,11 @@ def build_dag(
     def add(node: Node) -> Node:
         if node.name in by_name:
             raise ValueError(f"duplicate DAG node {node.name!r}")
+        if node.name in queued:
+            # Still pending/running from an earlier submission (2026-09-27: a
+            # resubmit after one failure re-emitted 110 live jobs): never submit
+            # it twice; dependants wait on the queued job id via ``dep``.
+            return node
         nodes.append(node)
         by_name[node.name] = node
         return node
@@ -925,6 +930,36 @@ def job_status(
     return "failed", error or "no exit line: killed (wall clock / OOM / node) or not started"
 
 
+def _manifest_store(path: Path) -> str | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("options", {}).get("store_root")
+    except (OSError, ValueError):
+        return None
+
+
+def merged_rows(
+    paths: list[Path], live: dict[str, dict[str, str]] | None, store_root: Path
+) -> list[tuple[dict[str, Any], str, str]]:
+    """One row per job name across manifests (oldest first): the copy that is in
+    the queue wins, then one that finished, then the newest. A job cancelled as a
+    duplicate therefore never hides the original that is still running or done."""
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    for p in paths:
+        try:
+            jobs = json.loads(p.read_text(encoding="utf-8")).get("jobs", [])
+        except (OSError, ValueError):
+            continue
+        for job in jobs:
+            candidates.setdefault(job["name"], []).append(job)
+    rows = []
+    for jobs in candidates.values():
+        judged = [(job, *job_status(job, live, store_root)) for job in jobs]
+        in_queue = [r for r in judged if live is not None and r[0].get("job_id") in live]
+        done = [r for r in judged if r[1] == "done"]
+        rows.append((in_queue or done or judged)[-1])
+    return rows
+
+
 def cmd_status(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="submit_all.py status")
     parser.add_argument("--manifest", type=Path, default=None, help="default: the latest one")
@@ -938,17 +973,22 @@ def cmd_status(argv: list[str]) -> int:
         return 1
     path = found[-1]
     payload = json.loads(path.read_text(encoding="utf-8"))
-    store_root = (REPO / payload.get("options", {}).get("store_root", DEFAULT_STORE)).resolve()
+    store_name = payload.get("options", {}).get("store_root", DEFAULT_STORE)
+    store_root = (REPO / store_name).resolve()
     live = squeue_ids()
-    print(f"manifest {path.relative_to(REPO) if path.is_relative_to(REPO) else path}  "
+    # Every submission to the same store, oldest first (a resubmit after a failure
+    # adds only the missing jobs, so one manifest alone is not the whole picture).
+    siblings = [path] if args.manifest else [
+        p for p in found
+        if _manifest_store(p) == store_name
+    ]
+    print(f"manifest {path.relative_to(REPO) if path.is_relative_to(REPO) else path}"
+          f"{f' (+{len(siblings) - 1} earlier for this store)' if len(siblings) > 1 else ''}  "
           f"commit {str(payload.get('git', {}).get('commit'))[:10]}  store {store_root}")
     if live is None:
         print("(squeue unavailable: states come from the logs and the run store only)")
 
-    rows = []
-    for job in payload.get("jobs", []):
-        state, detail = job_status(job, live, store_root)
-        rows.append((job, state, detail))
+    rows = merged_rows(siblings, live, store_root)
 
     counts: dict[str, dict[str, int]] = {}
     for job, state, _ in rows:
