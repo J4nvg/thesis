@@ -240,3 +240,6 @@ stage1_*.parquet
 # runs_verify); like /runs/, a run store is never committed.
 /logs/
 /runs_*/
+
+# CatBoost training logs (written to the working directory by every CatBoost fit)
+catboost_info/

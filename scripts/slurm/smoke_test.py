@@ -80,10 +80,12 @@ def check_main(gpu: bool) -> dict:
 
     lightgbm.LGBMRegressor(n_estimators=5, verbose=-1).fit(features, target)
     xgboost.XGBRegressor(n_estimators=5, device="cpu").fit(features, target)
-    catboost.CatBoostRegressor(iterations=5, verbose=False, task_type="CPU").fit(features, target)
+    catboost.CatBoostRegressor(iterations=5, verbose=False, task_type="CPU", allow_writing_files=False).fit(features, target)
     if gpu:
         xgboost.XGBRegressor(n_estimators=5, device="cuda").fit(features, target)
-        catboost.CatBoostRegressor(iterations=5, verbose=False, task_type="GPU").fit(
+        catboost.CatBoostRegressor(
+            iterations=5, verbose=False, task_type="GPU", allow_writing_files=False
+        ).fit(
             features, target
         )
     info["versions"] = {
