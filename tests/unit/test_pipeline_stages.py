@@ -37,6 +37,7 @@ from strikecast.config.schema import (  # noqa: E402
     TrackingConfig,
     TransformConfig,
     TuningConfig,
+    WindowTransformConfig,
 )
 from strikecast.data.series import build_bundle  # noqa: E402
 from strikecast.pipeline import data_stage, report_stage, run_stage, tune_stage  # noqa: E402
@@ -175,13 +176,22 @@ def test_feature_sets_load_the_converted_legacy_schema(cfg, store, bundle, tmp_p
         encoding="utf-8",
     )
     cfg = cfg.model_copy(
-        update={"feature_selection": cfg.feature_selection.model_copy(
-            update={"cache_path": str(legacy)}
-        )}
+        update={
+            "feature_selection": cfg.feature_selection.model_copy(
+                update={"cache_path": str(legacy)}
+            ),
+            # a thesis set carries no provenance: accepted ONLY under the legacy
+            # expdecay7 window (audit A13, tests/unit/test_feature_selection_cache.py)
+            "series": SeriesConfig(window=WindowTransformConfig(expdecay="legacy_alpha")),
+        }
     )
     sets = data_stage.build_or_load_features(cfg, store, bundle)
     assert sets.source == "cache_path"
-    assert sets.past_keep == ["past_a", "past_b"]  # sorted, as `past_keep` is
+    # The RECORDED order is kept, never sorted (F16): `subset_components` reads
+    # these names in order, so the component order is the column order the GBDTs
+    # are fitted on. Sorting moved the diff `MASE_mean` by 6.9% against
+    # `golden/results/diff`; see `data_stage._sets_from_payload`.
+    assert sets.past_keep == ["past_b", "past_a"]
     assert sets.future_keep == ["holiday_x"]
 
 
@@ -429,6 +439,9 @@ def test_tune_model_writes_best_params_and_is_not_repeated(cfg, data, store, mon
     payload = json.loads((directory / "best_params.json").read_text(encoding="utf-8"))
     assert payload["study_name"] == "linear"
     assert payload["n_trials"] == 2
+    # the features the study was tuned on are recorded (leaky vs thesis expdecay7)
+    assert payload["provenance"]["expdecay"] == cfg.series.window.expdecay
+    assert payload["provenance"]["features_hash"] == data.features.hash
 
     # Appendix C: a second call does not re-tune
     again = tune_stage.tune_model(cfg, "linear", data, store=store, n_trials=2)
@@ -477,3 +490,70 @@ def test_report_writes_a_leaderboard_from_the_stored_metrics(cfg, data, store) -
     frame = pd.read_csv(written["leaderboard"])
     assert len(frame) >= 2
     assert {"naive_last", "naive_weekly"} <= set(frame["model"])
+
+
+# --------------------------------------------------------------------------- #
+# B7: the RNN tuning objective is the legacy one
+# --------------------------------------------------------------------------- #
+def _tune_recording(cfg, data, store, monkeypatch, spec):
+    """Tune ``spec`` for 2 trials; return the presets/forecasters used and the study."""
+    import optuna  # noqa: PLC0415
+
+    monkeypatch.setattr(tune_stage, "get_spec", lambda name, exp=None: spec)
+    seen: list[Any] = []
+    real = tune_stage.make_forecaster
+
+    def recording(*args, **kwargs):
+        forecaster = real(*args, **kwargs)
+        seen.append((kwargs["preset"], forecaster))
+        return forecaster
+
+    monkeypatch.setattr(tune_stage, "make_forecaster", recording)
+    outcome = tune_stage.tune_model(cfg, "linear", data, store=store, n_trials=2)
+    assert not outcome.skipped
+    storage = f"sqlite:///{store.tuning_dir(cfg.name, 'linear') / 'optuna.sqlite3'}"
+    study = optuna.load_study(study_name="linear", storage=storage)
+    return seen, study, outcome
+
+
+def test_rnn_trials_are_scored_like_the_legacy_objective(cfg, data, store, monkeypatch) -> None:
+    """``make_nn_objective``: ``run_expanding_cv`` (exp log-link ON), one score
+    over all folds, NO per-fold ``trial.report`` (audit B7)."""
+    pytest.importorskip("optuna")
+    import dataclasses  # noqa: PLC0415
+
+    spec = dataclasses.replace(_tunable_linear_spec(), is_neural=True)
+    assert tune_stage.trial_protocol(spec) == ("for_cv", False)
+    seen, study, outcome = _tune_recording(cfg, data, store, monkeypatch, spec)
+
+    assert {preset for preset, _ in seen} == {"for_cv"}
+    assert all(f.apply_log_link and f.is_neural for _, f in seen)
+    assert all(not t.intermediate_values for t in study.trials), "no per-fold reports"
+    assert outcome.best_value is not None and np.isfinite(outcome.best_value)
+
+
+def test_gbdt_trials_keep_the_per_fold_pruning(cfg, data, store, monkeypatch) -> None:
+    """``make_gbm_objective``: ``run_expanding_cv_iter`` (no exp, F56), the running
+    score reported after every fold."""
+    pytest.importorskip("optuna")
+    spec = _tunable_linear_spec()
+    assert tune_stage.trial_protocol(spec) == ("for_tuning", True)
+    seen, study, _ = _tune_recording(cfg, data, store, monkeypatch, spec)
+
+    assert {preset for preset, _ in seen} == {"for_tuning"}
+    assert all(not f.apply_log_link for _, f in seen)
+    n_folds = max(len(t.intermediate_values) for t in study.trials)
+    assert n_folds > 1
+    assert sorted(study.trials[0].intermediate_values) == list(range(n_folds))
+
+
+def test_rnn_specs_use_the_legacy_protocol() -> None:
+    """Every registered RNN spec takes the neural branch, every GBDT the other."""
+    import strikecast.models.gbm  # noqa: F401, PLC0415
+    import strikecast.models.rnn  # noqa: F401, PLC0415
+    from strikecast.models.spec import get_spec  # noqa: PLC0415
+
+    for name in ("lstm_poisson_w7", "gru_tweedie_w28", "lstm_w14"):
+        assert tune_stage.trial_protocol(get_spec(name, "count")) == ("for_cv", False)
+    for name in ("lightgbm_poisson", "catboost_tweedie"):
+        assert tune_stage.trial_protocol(get_spec(name, "count")) == ("for_tuning", True)

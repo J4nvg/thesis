@@ -35,6 +35,13 @@ from strikecast.models.spec import get_spec, registered_names
 
 EXPERIMENTS = ("count", "diff", "hurdle", "damage")
 
+#: Every file under `configs/experiment/`. `chronos2` is the P5 family added by
+#: Stream H; it is deliberately NOT in `EXPERIMENTS`, because the assertions below
+#: are the frozen plan-sec.-2.3 settings of the four P3 families and Chronos-2
+#: shares none of them (no CV stage, no feature selection, no darts lags).
+#: Its own config assertions live in `tests/unit/test_chronos_adapter.py`.
+EXPERIMENT_FILES = (*EXPERIMENTS, "chronos2")
+
 
 @pytest.fixture(scope="module")
 def configs() -> dict[str, ExperimentConfig]:
@@ -48,7 +55,9 @@ def configs() -> dict[str, ExperimentConfig]:
 def test_the_configs_tree_sits_next_to_the_package() -> None:
     root = default_config_dir()
     assert root.is_dir()
-    assert sorted(p.stem for p in (root / "experiment").glob("*.yaml")) == sorted(EXPERIMENTS)
+    assert sorted(p.stem for p in (root / "experiment").glob("*.yaml")) == sorted(
+        EXPERIMENT_FILES
+    )
 
 
 @pytest.mark.parametrize("name", EXPERIMENTS)
@@ -261,19 +270,30 @@ def test_every_configured_device_matches_its_spec(name: str, configs) -> None:
         # Its own selection: objective "regression" on CPU with 4 threads.
         ("diff", "diffreg", "cpu", 4),
         # Library-default LightGBM, Poisson with positive-only weights (F27).
-        ("hurdle", "zipoisson_regressor", "cpu", None),
+        ("hurdle", "zipoisson_regressor", "cpu", 8),
         # The damage family reuses the hurdle classifier selection, per key.
-        ("damage", "zipoisson_classifier", "cpu", None),
+        ("damage", "zipoisson_classifier", "cpu", 8),
     ],
 )
 def test_feature_selection_is_per_family(
     name: str, selector: str, device: str, threads: int | None, configs
 ) -> None:
-    fs = configs[name].feature_selection
+    """The THESIS selector settings, i.e. under ``legacy=<name>``.
+
+    (hurdle/damage passed no device/thread kwarg at all, so their legacy
+    overrides keep the deterministic publication settings: there is no thesis
+    cache to reproduce, A11.)
+    """
+    fs = load_experiment(name, [f"legacy={name}"]).feature_selection
     assert fs.selector == selector
     assert fs.device == device
     assert fs.num_threads == threads
     assert fs.top_k == 100  # F25: 100 LAGGED names, not 100 base features
+    # the publication config: same selector, deterministic CPU, cached once
+    pub = configs[name].feature_selection
+    assert pub.selector == selector
+    assert (pub.device, pub.num_threads, pub.deterministic) == ("cpu", 8, True)
+    assert pub.top_k == 100
 
 
 def test_the_hurdle_family_has_two_feature_selections(configs) -> None:
@@ -294,11 +314,38 @@ def test_only_the_damage_family_selects_per_key(configs) -> None:
 
 
 def test_only_the_regression_families_cache_their_selection(configs) -> None:
-    assert configs["count"].feature_selection.cache_path == "features/countreg_saved_sets.pkl"
-    assert configs["diff"].feature_selection.cache_path == "features/diffreg_saved_sets.pkl"
+    # Thesis mode (`legacy=<name>`): the converted phase-0 JSON, not the legacy
+    # pickle -- `build_or_load_features` reads `cache_path` as JSON (F16).
+    assert (
+        load_experiment("count", ["legacy=count"]).feature_selection.cache_path
+        == "golden/converted/feature_sets/countreg.json"
+    )
+    assert (
+        load_experiment("diff", ["legacy=diff"]).feature_selection.cache_path
+        == "golden/converted/feature_sets/diffreg.json"
+    )
     for name in ("hurdle", "damage"):
-        assert configs[name].feature_selection.cache is False
-        assert configs[name].feature_selection.cache_path is None
+        legacy = load_experiment(name, [f"legacy={name}"])
+        assert legacy.feature_selection.cache_path is None
+    # Publication mode (audit A13/D2): no golden set, selected once by
+    # `strikecast featsel`, cached, and required by every later job.
+    for name in ("count", "diff", "hurdle", "damage"):
+        fs = configs[name].feature_selection
+        assert fs.cache_path is None
+        assert fs.cache is True and fs.require_cached is True and fs.deterministic is True
+        for head in configs[name].feature_selections.values():
+            assert head.cache is True and head.require_cached is True and head.deterministic
+
+
+def test_publication_configs_use_the_leaky_filter_and_legacy_pins_expdecay7(configs) -> None:
+    """Audit A1/D1: publication = ``leaky``; ``legacy=<name>`` = the thesis filter."""
+    for name in ("count", "diff", "hurdle", "damage"):
+        assert configs[name].series.window.expdecay == "leaky"
+        assert configs[name].series.window.transforms[-1]["function_name"] == "leaky7"
+        legacy = load_experiment(name, [f"legacy={name}"])
+        assert legacy.series.window.expdecay == "legacy_alpha"
+        assert legacy.series.window.transforms[-1]["function_name"] == "expdecay7"
+        assert legacy.resolved_hash() != configs[name].resolved_hash()
 
 
 def test_only_the_hurdle_test_stage_scales_on_train_plus_val(configs) -> None:

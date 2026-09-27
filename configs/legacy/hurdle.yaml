@@ -1,0 +1,15 @@
+# @package _global_
+# Thesis-faithful feature mode for the HURDLE family (audit 2026-09-26 A1/A11/A12, D1/D2/D9).
+#
+#   strikecast featsel experiment=hurdle legacy=hurdle      # once
+#   strikecast run     experiment=hurdle legacy=hurdle ...
+#
+# Only the window transform is legacy.  No cached thesis selection exists for the
+# hurdle heads (`zipoisson.json` is NOT the final hurdle's regressor set, A11; the
+# notebook re-selected in every session with an unpinned hash seed, A12/B9), so
+# the heads are selected once, deterministically, on the legacy expdecay7
+# columns, exactly as the publication config does it on the leaky7 columns.
+# Keep legacy and publication runs in different store roots (`--store-root`).
+series:
+  window:
+    expdecay: legacy_alpha

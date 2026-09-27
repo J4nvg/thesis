@@ -10,6 +10,15 @@ Every default here reproduces the legacy behaviour exactly:
 * the 70/10/20 fractions come from ``TRAIN_FRAC, VAL_FRAC, TEST_FRAC`` in
   ``_regression_GBDT.py`` / ``_regression_LSTM.py`` / ``_diff_regression.py``;
 * ``expdecay7``'s alpha is ``src/feature_tools.py::halflife_to_alpha(7)``.
+
+**The one documented exception** (audit 2026-09-26, A1/D1) is the sixth window
+transform. The thesis describes a 7-day-half-life leaky integrator
+``s_t = x_t + 2^(-1/7) s_{t-1}``, but the legacy code passed ``alpha=2^(-1/7)``
+to pandas' ``ewm``, where alpha weights *today's* value, so ``expdecay7`` is
+almost the raw series. :attr:`WindowTransformConfig.expdecay` switches between
+the two; its default is the FIXED filter (``"leaky"``, feature name ``leaky7``),
+and everything that reproduces the thesis pins ``"legacy_alpha"`` explicitly
+(the golden tests and ``configs/legacy/<experiment>.yaml``).
 """
 
 from __future__ import annotations
@@ -34,6 +43,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 __all__ = [
     "DEFAULT_EWM_HALFLIFE",
+    "DEFAULT_EXPDECAY",
+    "EXPDECAY_FUNCTION_NAMES",
     "LEGACY_ADD_ENCODERS",
     "BacktestConfig",
     "CalibrationConfig",
@@ -57,6 +68,7 @@ __all__ = [
     "WindowTransformConfig",
     "available_threads",
     "default_window_transforms",
+    "expdecay_transform",
     "halflife_to_alpha",
 ]
 
@@ -89,8 +101,48 @@ def available_threads() -> int:
     return min(cpu_count, 64)
 
 
-def default_window_transforms() -> list[dict[str, Any]]:
-    """The six window transforms hard-coded in the legacy pipeline, in order."""
+#: The two forms of the sixth window transform (audit 2026-09-26, A1/D1).
+#:
+#: ``legacy_alpha``
+#:     ``{"function": "mean", "mode": "ewm", "alpha": 2**(-1/7)}``, named
+#:     ``expdecay7``: bit-identical to ``src/ts_specific_tools.py:46``. pandas'
+#:     ``alpha`` weights the CURRENT value, so this is ``s_t = 0.906 x_t +
+#:     0.094 s_{t-1}`` (normalised) -- almost the raw series, NOT the thesis'
+#:     leaky integrator. Kept only to reproduce the thesis.
+#: ``leaky``
+#:     ``{"function": "sum", "mode": "ewm", "halflife": 7}``, named ``leaky7``:
+#:     exactly the thesis equation ``s_t = x_t + 2^(-1/7) s_{t-1}`` with
+#:     ``s_{-1} = 0`` (pandas' ``ewm(...).sum()`` with ``adjust=True`` IS the
+#:     unnormalised recursion). The distinct name means a legacy selection can
+#:     never silently subset the new columns.
+ExpdecayMode = Literal["legacy_alpha", "leaky"]
+
+#: The schema default: the FIXED filter (decision D1). Every thesis
+#: reproduction pins ``"legacy_alpha"`` explicitly.
+DEFAULT_EXPDECAY: ExpdecayMode = "leaky"
+
+#: ``function_name`` of the sixth transform, per mode.
+EXPDECAY_FUNCTION_NAMES: dict[str, str] = {"legacy_alpha": "expdecay7", "leaky": "leaky7"}
+
+
+def expdecay_transform(mode: str = DEFAULT_EXPDECAY) -> dict[str, Any]:
+    """The sixth window transform for one :data:`ExpdecayMode`."""
+    if mode == "legacy_alpha":
+        return {"function": "mean", "mode": "ewm", "alpha": halflife_to_alpha(DEFAULT_EWM_HALFLIFE),
+                "function_name": EXPDECAY_FUNCTION_NAMES["legacy_alpha"]}
+    if mode == "leaky":
+        return {"function": "sum", "mode": "ewm", "halflife": DEFAULT_EWM_HALFLIFE,
+                "function_name": EXPDECAY_FUNCTION_NAMES["leaky"]}
+    raise ValueError(f"unknown expdecay mode {mode!r}; expected 'legacy_alpha' or 'leaky'")
+
+
+def default_window_transforms(expdecay: str = DEFAULT_EXPDECAY) -> list[dict[str, Any]]:
+    """The six window transforms of the legacy pipeline, in order.
+
+    The first five are hard-coded in ``src/ts_specific_tools.py``; the sixth is
+    :func:`expdecay_transform` of ``expdecay`` (``"legacy_alpha"`` reproduces
+    the legacy list bit for bit).
+    """
     return [
         {"function": "sum", "mode": "rolling", "window": 14, "min_periods": 1,
          "function_name": "rsum14"},
@@ -101,22 +153,63 @@ def default_window_transforms() -> list[dict[str, Any]]:
         {"function": "mean", "mode": "rolling", "window": 28, "min_periods": 1,
          "function_name": "rmean28"},
         {"function": "mean", "mode": "ewm", "span": 14, "function_name": "ewma14"},
-        {"function": "mean", "mode": "ewm", "alpha": halflife_to_alpha(DEFAULT_EWM_HALFLIFE),
-         "function_name": "expdecay7"},
+        expdecay_transform(expdecay),
     ]
 
 
 class WindowTransformConfig(BaseModel):
-    """Configuration for the darts ``WindowTransformer`` on the past covariates."""
+    """Configuration for the darts ``WindowTransformer`` on the past covariates.
+
+    ``expdecay`` selects the sixth transform (:data:`ExpdecayMode`, audit
+    2026-09-26 A1/D1). When ``transforms`` is not given it is derived from
+    ``expdecay``; a hand-written ``transforms`` list that contradicts
+    ``expdecay`` -- the other mode's transform, or this mode's name with other
+    parameters -- is rejected. Build a legacy config with
+    ``WindowTransformConfig(expdecay="legacy_alpha")``: ``model_copy(update=...)``
+    does not re-validate and would leave the old mode's transform behind.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
+    expdecay: ExpdecayMode = DEFAULT_EXPDECAY
     transforms: list[dict[str, Any]] = Field(default_factory=default_window_transforms)
     treat_na: Any = 0
     forecasting_safe: bool = True
     keep_non_transformed: bool = True
     include_current: bool = True
     keep_names: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _transforms_follow_expdecay(cls, value: Any) -> Any:
+        """Derive ``transforms`` from ``expdecay`` when it is not given."""
+        if isinstance(value, dict) and value.get("transforms") is None:
+            value = dict(value)
+            value["transforms"] = default_window_transforms(
+                value.get("expdecay", DEFAULT_EXPDECAY)
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _transforms_agree_with_expdecay(self) -> WindowTransformConfig:
+        """Refuse a ``transforms`` list that contradicts :attr:`expdecay`."""
+        expected = expdecay_transform(self.expdecay)
+        for mode, name in EXPDECAY_FUNCTION_NAMES.items():
+            for transform in self.transforms:
+                if transform.get("function_name") != name:
+                    continue
+                if mode != self.expdecay:
+                    raise ValueError(
+                        f"series.window.expdecay={self.expdecay!r} but `transforms` contains "
+                        f"the {mode!r} transform {name!r}; drop `transforms` to derive it "
+                        "from `expdecay` (audit A1/D1)"
+                    )
+                if dict(transform) != expected:
+                    raise ValueError(
+                        f"series.window.transforms has a {name!r} transform {transform!r} "
+                        f"that differs from the {self.expdecay!r} definition {expected!r}"
+                    )
+        return self
 
     def transformer_kwargs(self) -> dict[str, Any]:
         """Keyword arguments for ``darts...WindowTransformer(...)``."""
@@ -421,6 +514,21 @@ class FeatureSelectionStageConfig(BaseModel):
     depends on ``PYTHONHASHSEED``, so the legacy selection cannot be
     regenerated.  New runs pin ``PYTHONHASHSEED=0``; see
     :func:`strikecast.seeds.record_env`.
+
+    Publication runs (audit 2026-09-26 A12/A13, decision D2) add two switches,
+    both ``False`` by default so the legacy behaviour is unchanged:
+
+    ``deterministic``
+        fit the selector on CPU with LightGBM ``deterministic=True``,
+        ``force_col_wise=True`` and the fixed :attr:`num_threads` (all
+        required: a validator refuses ``device != "cpu"`` or
+        ``num_threads=None``), and refuse to compute unless
+        ``PYTHONHASHSEED=0``.
+    ``require_cached``
+        the data stage never computes a selection; it must already be in the
+        run store, written once per family/head by ``strikecast featsel
+        experiment=<name>``, or come from :attr:`cache_path`. A missing cache
+        is a loud error, so no cv/tune/test job can silently re-select.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -434,6 +542,28 @@ class FeatureSelectionStageConfig(BaseModel):
     cache: bool = True
     cache_path: str | None = None
     per_key: bool = False
+    deterministic: bool = False
+    require_cached: bool = False
+
+    @model_validator(mode="after")
+    def _deterministic_needs_cpu_and_threads(self) -> FeatureSelectionStageConfig:
+        if self.deterministic:
+            if self.device.lower() != "cpu":
+                raise ValueError(
+                    "feature_selection.deterministic=true needs device=cpu: LightGBM's "
+                    f"`deterministic` has no effect on {self.device!r} (audit A12, Q9)"
+                )
+            if self.num_threads is None:
+                raise ValueError(
+                    "feature_selection.deterministic=true needs a fixed num_threads "
+                    "(null falls back to the OpenMP default of the machine; audit A12)"
+                )
+        if self.require_cached and not self.cache and not self.cache_path:
+            raise ValueError(
+                "feature_selection.require_cached=true needs cache=true (or a cache_path): "
+                "`strikecast featsel` must be able to write the selection it requires"
+            )
+        return self
 
     def build(self) -> FeatureSelectionConfig:
         """The ``FeatureSelectionConfig`` of this family, from the legacy builders."""
@@ -457,6 +587,19 @@ class FeatureSelectionStageConfig(BaseModel):
             cfg = zipoisson_classifier_config()
         if cfg.top_k != self.top_k:
             cfg = cfg.model_copy(update={"top_k": self.top_k})
+        if self.deterministic:
+            # A12/D2: CPU, fixed threads, LightGBM's deterministic mode. Every
+            # selector already fixes `random_state=42`; the col-wise histogram
+            # is what makes the fit thread-count invariant (audit B5).
+            kwargs = dict(cfg.model_kwargs)
+            kwargs.update(
+                device_type="cpu",
+                num_threads=int(self.num_threads),  # type: ignore[arg-type]
+                deterministic=True,
+            )
+            if not kwargs.get("force_row_wise"):
+                kwargs["force_col_wise"] = True
+            cfg = cfg.model_copy(update={"model_kwargs": kwargs})
         return cfg
 
 
@@ -498,6 +641,15 @@ class ModelEntry(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     device: str | None = None
     fallback: Literal["naive_mean"] | None = None
+    #: The paradigms this model runs in when a job matrix is built WITHOUT an
+    #: explicit ``paradigm=`` selector (``scripts/slurm/make_jobs.py``,
+    #: ``submit_all.py``): the thesis-faithful matrix of audit 2026-09-26
+    #: C16/D8.  ``None`` = the experiment's own ``paradigms`` (the composed
+    #: ``/paradigm`` group, i.e. Global only); ``[]`` = not part of the default
+    #: matrix at all (a composite's components, which run inside the composite).
+    #: Job-matrix metadata only: no stage reads it, so it never changes what a
+    #: run computes, and an explicit selector still runs any paradigm.
+    paradigms: list[Paradigm] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -739,6 +891,20 @@ class TrackingConfig(BaseModel):
     project: str = "strikecast"
     entity: str | None = None
     group: str | None = None
+    #: Where the backend writes its own run directories.  Only offline runs
+    #: need it: on the cluster it points at scratch (``$WANDB_DIR``), and
+    #: ``scripts/wandb_sync.sh -d <dir>`` syncs from there afterwards.  ``None``
+    #: -- the default -- passes no ``dir`` to ``wandb.init``, which is what the
+    #: tracker did before this field existed, so behaviour is unchanged.
+    dir: str | None = None
+    #: Fail loudly on a tracking error instead of disabling the mirror.  The
+    #: default is ``False``: the run store is the source of truth (sec. 5.5) and
+    #: a W&B outage must not abort a run whose predictions are on disk.  The
+    #: P4 smoke test sets it, because there a broken mirror IS the failure.
+    strict: bool = False
+    #: Extra W&B tags, appended to the ``[family, kind]`` the model spec
+    #: supplies.  Empty by default, so the tag set is unchanged.
+    tags: list[str] = Field(default_factory=list)
 
 
 class StoreConfig(BaseModel):

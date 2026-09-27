@@ -1,0 +1,17 @@
+# @package _global_
+# Thesis-faithful feature mode for the DIFF family (audit 2026-09-26 A1/A13, D1/D2/D9).
+#
+#   strikecast run experiment=diff legacy=diff ...
+#
+# The legacy `expdecay7` window transform plus the thesis' own cached selection
+# (`features/diffreg_saved_sets.pkl`, frozen as JSON).  The cache has no
+# provenance, so it is accepted ONLY under expdecay=legacy_alpha (A13 guard).
+# Keep legacy and publication runs in different store roots (`--store-root`).
+series:
+  window:
+    expdecay: legacy_alpha
+feature_selection:
+  device: cpu          # device_type="cpu"
+  num_threads: 4       # available_threads = 4, hard-coded (_diff_regression.py:90)
+  deterministic: false
+  cache_path: golden/converted/feature_sets/diffreg.json

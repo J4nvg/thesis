@@ -9,6 +9,9 @@ defaults:
   - /tracking: wandb_online
   - /seeds: default
   - _self_
+  # Thesis-faithful feature mode (legacy expdecay7; count/diff also load the thesis' cached selection):
+  # `legacy=damage` loads configs/legacy/damage.yaml AFTER this file.
+  - /legacy: null
 
 name: damage
 
@@ -40,6 +43,12 @@ series:
     train: 0.70
     val: 0.10
     test: 0.20
+  # Audit 2026-09-26 A1/D1: the sixth window transform is the literal leaky
+  # integrator s_t = x_t + 2^(-1/7) s_{t-1} (`leaky7`), as the thesis text
+  # describes.  The thesis itself ran the buggy `expdecay7` (alpha weighting
+  # TODAY); reproduce it with `legacy=<experiment>` (configs/legacy/).
+  window:
+    expdecay: leaky
 
 # Plan sec. 2.3: identity.  Rejected otherwise, because the channels are
 # probabilities (F71).
@@ -61,20 +70,28 @@ common_kwargs:
 # `get_feature_selector_classifier` is LightGBMClassifierModel(objective="binary",
 # is_unbalance=True, random_state=RANDOM_STATE) (cell 10), run once per damage
 # key (plan sec. 2.3, F27).
+# Selected once per key by `strikecast featsel experiment=damage` (CPU,
+# deterministic LightGBM, fixed threads, PYTHONHASHSEED=0) and cached; the
+# notebook re-selected in every session (audit A12, D2).
 feature_selection:
   selector: zipoisson_classifier
-  device: cpu        # no device kwarg in that builder; inert here
-  num_threads: null  # no thread kwarg either
+  device: cpu
+  num_threads: 8     # the notebook passed no thread kwarg
   top_k: 100
-  cache: false       # this notebook writes no features/*.pkl
+  cache: true        # the notebook cached nothing (cache: false)
   cache_path: null
   per_key: true      # one selection per damage key
+  deterministic: true
+  require_cached: true
 
 # The two registry entries of `models/classifiers.py` for this family.
 # F7: never tuned.
+# `paradigms:` = job-matrix metadata (audit 2026-09-26 C16): the component runs
+# inside the composite, never as a standalone job.  The damage family is not
+# reported in the thesis (B19) and is OUT of the default `submit_all` DAG.
 models:
-  - spe_damage_classifier   # get_damage_classifier() (cell 10)
-  - damage                  # the per-key composite
+  - {name: spe_damage_classifier, paradigms: []}   # get_damage_classifier() (cell 10)
+  - {name: damage, paradigms: [global]}            # the per-key composite
 
 # Global only: `damage_classifier.ipynb` defines `run_damage_cv` (cell 17) and
 # `run_final_test` (cell 26) and no per-activity or per-region wrapper, so the

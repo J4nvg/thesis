@@ -218,10 +218,13 @@ __marimo__/
 .streamlit/secrets.toml
 for_the_dataset/
 
-# Experiment artefacts (run store is local truth, mirrored to W&B)
-runs/
-golden/
-wandb/
+# Experiment artefacts (run store is local truth, mirrored to W&B).
+# Leading slash = repo root only. Unanchored, `golden/` also swallowed
+# `tests/golden/` (the level A-I behaviour-preservation suite), which is source
+# and MUST stay tracked; the same trap applies to the other names here.
+/runs/
+/golden/
+/wandb/
 *.sqlite3
 # Legacy artefacts kept locally, no longer versioned
 checkpoints/
@@ -231,3 +234,9 @@ results/
 prelimFeatureImportance*.csv
 stage1_*.csv
 stage1_*.parquet
+
+# submit_all.py (Stream 3, audit 2026-09-26 C27/C30): SLURM logs + submission
+# manifests, and the run stores it writes (runs_publication, runs_benchmark,
+# runs_verify); like /runs/, a run store is never committed.
+/logs/
+/runs_*/

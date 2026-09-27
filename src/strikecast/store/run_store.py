@@ -54,7 +54,28 @@ Every write goes to a temporary file in the destination directory and is then
 ``strikecast.data.cache.cached_parquet`` and ``PredictionSet.to_parquet``
 follow. Unlike those two, the helpers here delete the temporary file if the
 write raises, so a crash mid-write leaves neither a partial part nor a stray
-``.tmp`` beside the finished ones.
+``.tmp`` beside the finished ones. The temporary name is unique per process,
+so two writers of one file never share (and clobber) a temporary.
+
+Concurrency (audit 2026-09-26 C23)
+----------------------------------
+``cv@42`` and ``test@42`` of one ``(model, paradigm)`` share a run directory
+and run as two concurrent SLURM jobs, possibly on two nodes over NFS. Every
+read-modify-write of ``state.json`` and ``env.json`` therefore happens under
+:class:`RunLock`, a lock DIRECTORY (``<run>/.state.lock``): ``mkdir`` is atomic
+on NFS, unlike ``flock``/``fcntl``. A lock left by a killed process is broken
+when its owner is a dead pid on this host, or when it is older than
+:data:`LOCK_STALE_AFTER_S` (critical sections take milliseconds).
+
+Attempts and interruption (audit C21)
+-------------------------------------
+``state.started`` is the start of the CURRENT attempt, and ``attempts`` keeps
+one entry per start (host, pid, SLURM job id, start, end, outcome, folds on
+disk), so a requeued or restarted stage no longer reports one inflated
+duration. A stage stopped by SIGTERM/SIGUSR1 (the SLURM wall clock, a requeue,
+``scancel``) is marked ``interrupted`` rather than left ``running``: the CLI
+installs the handler (``strikecast.pipeline.interrupt``) and
+:func:`interrupt_active_stages` marks every stage this process had started.
 """
 
 from __future__ import annotations
@@ -64,6 +85,9 @@ import json
 import math
 import os
 import re
+import socket
+import time
+import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -84,13 +108,30 @@ __all__ = [
     "PartWriter",
     "PersistHook",
     "RunKey",
+    "RunLock",
     "RunStore",
     "StageState",
     "Status",
+    "interrupt_active_stages",
     "stage_hash",
 ]
 
-Status = Literal["pending", "running", "complete", "failed"]
+Status = Literal["pending", "running", "complete", "failed", "interrupted"]
+
+#: A lock directory older than this is taken to be left by a killed process.
+#: The critical sections it guards are one JSON read and one atomic write.
+LOCK_STALE_AFTER_S = 300.0
+#: How long a writer waits for the lock before giving up loudly.
+LOCK_TIMEOUT_S = 600.0
+
+#: SLURM variables recorded per attempt, so ``status`` can map a stage to a job.
+_SLURM_ENV = (
+    "SLURM_JOB_ID",
+    "SLURM_ARRAY_JOB_ID",
+    "SLURM_ARRAY_TASK_ID",
+    "SLURM_RESTART_COUNT",
+    "SLURM_JOB_PARTITION",
+)
 
 #: The ``evaluate_long`` views, in the order §5.3 lists their files. ``global``
 #: is a single row and is written as JSON; the rest are frames written as CSV.
@@ -151,10 +192,15 @@ def _jsonable(obj: Any) -> Any:
     return str(obj)
 
 
+def _tmp_name(path: Path) -> Path:
+    """A temporary sibling of ``path`` that no other process can be using."""
+    return path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+
+
 def _atomic_text(path: Path, text: str) -> Path:
     """Write ``text`` to ``path`` atomically, removing the temp file on failure."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = _tmp_name(path)
     try:
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, path)
@@ -176,7 +222,7 @@ def _atomic_parquet(path: Path, frame: pd.DataFrame) -> Path:
     completed.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = _tmp_name(path)
     try:
         frame.to_parquet(tmp, index=False)
         os.replace(tmp, path)
@@ -194,6 +240,147 @@ def _check_name(name: str, what: str) -> str:
     if not _SAFE_NAME.match(name) or "/" in name or "\\" in name:
         raise ValueError(f"unsafe {what} {name!r}: must be a plain path segment")
     return name
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # alive, owned by someone else
+        return True
+    return True
+
+
+class RunLock:
+    """An NFS-safe, re-entrant (per process) lock on one run directory.
+
+    ``os.mkdir`` of ``<run>/.state.lock`` either creates the directory or fails,
+    atomically, on a local disk and on NFS alike -- which ``fcntl``/``flock``
+    are not guaranteed to be on the cluster's shared ``/home``. The owner writes
+    ``host pid`` into the directory so a lock left behind by a killed process
+    can be recognised: same host and a dead pid, or older than
+    :data:`LOCK_STALE_AFTER_S`, and it is broken.
+
+    Re-entrant within one process (a depth counter per path), so a method that
+    holds the lock may call another that takes it.
+    """
+
+    _held: dict[str, int] = {}
+
+    def __init__(
+        self,
+        run_dir: Path,
+        *,
+        timeout: float = LOCK_TIMEOUT_S,
+        stale_after: float = LOCK_STALE_AFTER_S,
+        poll: float = 0.05,
+    ) -> None:
+        self.path = Path(run_dir) / ".state.lock"
+        self.timeout = timeout
+        self.stale_after = stale_after
+        self.poll = poll
+
+    def _key(self) -> str:
+        return str(self.path.resolve()) if self.path.parent.exists() else str(self.path)
+
+    def _is_stale(self) -> bool:
+        try:
+            age = time.time() - self.path.stat().st_mtime
+        except FileNotFoundError:
+            return False
+        try:
+            host, pid = (self.path / "owner").read_text(encoding="utf-8").split()
+            if host == socket.gethostname() and not _pid_alive(int(pid)):
+                return True
+        except (OSError, ValueError):
+            pass
+        return age > self.stale_after
+
+    def _break(self) -> None:
+        for child in self.path.glob("*"):
+            child.unlink(missing_ok=True)
+        try:
+            self.path.rmdir()
+        except FileNotFoundError:
+            pass
+
+    def acquire(self) -> None:
+        key = self._key()
+        if RunLock._held.get(key):
+            RunLock._held[key] += 1
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                os.mkdir(self.path)
+            except FileExistsError:
+                if self._is_stale():
+                    self._break()
+                    continue
+                if time.monotonic() > deadline:
+                    raise TimeoutError(
+                        f"could not lock {self.path} within {self.timeout:.0f}s; "
+                        "remove the directory if no strikecast process is running"
+                    ) from None
+                time.sleep(self.poll)
+                continue
+            try:
+                (self.path / "owner").write_text(
+                    f"{socket.gethostname()} {os.getpid()}", encoding="utf-8"
+                )
+            except OSError:  # the lock itself is the directory; the note is a courtesy
+                pass
+            RunLock._held[self._key()] = 1
+            return
+
+    def release(self) -> None:
+        key = self._key()
+        depth = RunLock._held.get(key, 0)
+        if depth > 1:
+            RunLock._held[key] = depth - 1
+            return
+        RunLock._held.pop(key, None)
+        self._break()
+
+    def __enter__(self) -> RunLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.release()
+
+
+#: Stages started by THIS process and not yet completed/failed/interrupted:
+#: ``(run_dir, stage) -> store``. The signal handler marks them ``interrupted``.
+_ACTIVE: dict[tuple[str, str], RunStore] = {}
+
+
+def interrupt_active_stages(reason: str = "interrupted") -> list[tuple[str, str]]:
+    """Mark every stage this process started and did not finish ``interrupted``.
+
+    Called by the CLI when SIGTERM/SIGUSR1 arrives (SLURM wall clock, requeue,
+    ``scancel``), so a killed stage does not stay ``running`` forever (C21).
+    Returns the ``(run_dir, stage)`` pairs it marked.
+    """
+    marked: list[tuple[str, str]] = []
+    for (run_dir, stage), store in list(_ACTIVE.items()):
+        try:
+            store.interrupt_stage(Path(run_dir), stage, reason)
+            marked.append((run_dir, stage))
+        except Exception:  # best effort: the process is going down anyway
+            pass
+    return marked
+
+
+def _attempt_env() -> dict[str, Any]:
+    info: dict[str, Any] = {"host": socket.gethostname(), "pid": os.getpid()}
+    for name in _SLURM_ENV:
+        value = os.environ.get(name)
+        if value is not None:
+            info[name.lower()] = value
+    return info
 
 
 def stage_hash(
@@ -250,6 +437,29 @@ class StageState:
     ``parts``
         One entry per written part: ``{"path", "from", "to", "rows"}`` with
         ``path`` relative to the stage's ``predictions`` directory.
+    ``tracker_run_id``
+        The id of the W&B run that mirrors THIS stage, or ``None`` when the
+        stage ran untracked (§5.5). It lives per stage because the mirror is
+        per stage -- ``cv`` and ``test`` of one run key are two W&B runs -- and
+        because ``state.json`` is the one file the store updates per stage
+        instead of rewriting. ``env.json`` carries the same ids for readers
+        that only look there; see :meth:`RunStore.record_tracker_run_id`.
+    ``params_source``
+        Where the model parameters came from: ``tuned`` (``best_params.json``),
+        ``config`` (the experiment entry) or ``defaults`` (the spec's). The
+        job generator never treats a stage that ran on ``defaults`` for a
+        tunable model as done (audit C17).
+    ``max_folds``
+        Set when the stage ran only its first ``max_folds`` folds (benchmark
+        pilot, legacy verification). Such a stage is complete as a truncated
+        stage -- its identity includes the limit -- but never counts as done
+        for the job generator.
+    ``attempts``
+        One entry per :meth:`RunStore.start_stage`: host, pid, SLURM ids,
+        ``started``/``ended``, ``outcome`` (``complete``/``failed``/
+        ``interrupted``, or ``lost`` when the next attempt found it still open)
+        and ``folds_done`` at the end. ``started`` is the CURRENT attempt's
+        start, not the first one's (audit C21).
     """
 
     stage: str
@@ -261,6 +471,10 @@ class StageState:
     started: str | None = None
     finished: str | None = None
     error: str | None = None
+    tracker_run_id: str | None = None
+    params_source: str | None = None
+    max_folds: int | None = None
+    attempts: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -272,6 +486,31 @@ class StageState:
         if unknown:
             raise ValueError(f"state.json has unknown fields {sorted(unknown)}")
         return cls(**{k: v for k, v in payload.items() if k in known})
+
+
+def _close_attempt(
+    state: StageState, outcome: str, ended: str | None, *, only_open: bool = False
+) -> None:
+    """Close the last attempt of ``state`` (no-op when there is none).
+
+    ``only_open`` closes it only if it is still open -- what ``start_stage``
+    does with an attempt whose process died without a word (``lost``).
+    """
+    if not state.attempts:
+        return
+    last = state.attempts[-1]
+    if only_open and "outcome" in last:
+        return
+    last["outcome"] = outcome
+    last["ended"] = ended
+    last["folds_done"] = int(state.folds_done)
+    if ended and last.get("started"):
+        try:
+            start = _dt.datetime.fromisoformat(str(last["started"]).replace("Z", "+00:00"))
+            end = _dt.datetime.fromisoformat(str(ended).replace("Z", "+00:00"))
+            last["seconds"] = round((end - start).total_seconds(), 1)
+        except ValueError:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -367,9 +606,58 @@ class RunStore:
     def read_env(self, run: RunKey | str | Path) -> dict[str, Any]:
         return json.loads((self.resolve(run) / "env.json").read_text(encoding="utf-8"))
 
+    def record_tracker_run_id(
+        self,
+        run: RunKey | str | Path,
+        run_id: str,
+        *,
+        stage: str | None = None,
+    ) -> Path:
+        """Record the tracker's run id for ``run`` (and, when given, ``stage``).
+
+        §5.5 asks that a run directory can be traced to its mirror **from disk
+        alone**. The id therefore lands in two places, neither of which is
+        state the store does not already own:
+
+        * ``state.json`` under the stage, because the mirror is per stage
+          (``cv`` and ``test`` are two W&B runs) and stage entries survive each
+          other;
+        * ``env.json`` as ``tracker_run_id`` (the most recent one) and
+          ``tracker_run_ids`` (stage -> id, rebuilt from ``state.json`` so an
+          ``env.json`` rewritten by a later stage does not lose the earlier
+          ids).
+
+        Merging rather than replacing: whatever
+        :meth:`write_env` recorded stays. Returns the ``env.json`` path.
+        """
+        run_id = str(run_id)
+        with self.lock(run):
+            if stage is not None:
+                state = self.read_state(run, stage) or StageState(stage=stage)
+                state.tracker_run_id = run_id
+                self.write_state(run, state)
+
+            try:
+                env = self.read_env(run)
+            except (OSError, ValueError):
+                env = {}
+            ids = dict(env.get("tracker_run_ids") or {})
+            for name, state in self.read_states(run).items():
+                if state.tracker_run_id:
+                    ids[name] = state.tracker_run_id
+            if stage is not None:
+                ids[str(stage)] = run_id
+            env["tracker_run_id"] = run_id
+            env["tracker_run_ids"] = ids
+            return self.write_env(run, env)
+
     # -- stage state --------------------------------------------------------
     def state_path(self, run: RunKey | str | Path) -> Path:
         return self.resolve(run) / "state.json"
+
+    def lock(self, run: RunKey | str | Path) -> RunLock:
+        """The run directory's :class:`RunLock` (``state.json``/``env.json`` RMW)."""
+        return RunLock(self.resolve(run))
 
     def read_states(self, run: RunKey | str | Path) -> dict[str, StageState]:
         """All stage states of a run, keyed by stage name (empty if none yet)."""
@@ -383,54 +671,88 @@ class RunStore:
         return self.read_states(run).get(stage)
 
     def write_state(self, run: RunKey | str | Path, state: StageState) -> Path:
-        """Replace one stage's entry in ``state.json``, keeping the others."""
-        states = self.read_states(run)
-        states[state.stage] = state
-        payload = {name: s.to_dict() for name, s in states.items()}
-        return _atomic_json(self.state_path(run), payload)
+        """Replace one stage's entry in ``state.json``, keeping the others.
+
+        The read-modify-write runs under :meth:`lock`, so a concurrent writer of
+        ANOTHER stage of the same run (``cv`` and ``test`` as two SLURM jobs)
+        can no longer lose this update, or this one lose its (C23).
+        """
+        with self.lock(run):
+            states = self.read_states(run)
+            states[state.stage] = state
+            payload = {name: s.to_dict() for name, s in states.items()}
+            return _atomic_json(self.state_path(run), payload)
 
     def start_stage(
         self,
         run: RunKey | str | Path,
         stage: str,
         stage_hash: str | None = None,
+        *,
+        params_source: str | None = None,
+        max_folds: int | None = None,
     ) -> StageState:
-        """Mark a stage ``running``.
+        """Mark a stage ``running`` and open a new attempt.
 
         A stage whose recorded hash differs from ``stage_hash`` is a different
         stage under the same name, so its parts are discarded and the state
         starts over. This is the only place the store deletes anything.
+        ``started`` is reset to now (the current attempt), and an attempt the
+        previous process left open is closed as ``lost``.
         """
-        state = self.read_state(run, stage)
-        if state is not None and stage_hash is not None and state.stage_hash != stage_hash:
-            self._clear_parts(run, stage)
-            state = None
-        if state is None:
-            state = StageState(stage=stage, stage_hash=stage_hash)
-        state.status = "running"
-        state.stage_hash = stage_hash if stage_hash is not None else state.stage_hash
-        state.started = state.started or _now()
-        state.finished = None
-        state.error = None
-        self.write_state(run, state)
+        now = _now()
+        with self.lock(run):
+            state = self.read_state(run, stage)
+            if state is not None and stage_hash is not None and state.stage_hash != stage_hash:
+                self._clear_parts(run, stage)
+                state = StageState(stage=stage, stage_hash=stage_hash, attempts=state.attempts)
+            if state is None:
+                state = StageState(stage=stage, stage_hash=stage_hash)
+            _close_attempt(state, "lost", None, only_open=True)
+            state.status = "running"
+            state.stage_hash = stage_hash if stage_hash is not None else state.stage_hash
+            state.started = now
+            state.finished = None
+            state.error = None
+            if params_source is not None:
+                state.params_source = params_source
+            state.max_folds = None if max_folds is None else int(max_folds)
+            state.attempts.append({"started": now, **_attempt_env()})
+            self.write_state(run, state)
+        _ACTIVE[(str(self.resolve(run)), stage)] = self
+        return state
+
+    def _finish(
+        self, run: RunKey | str | Path, stage: str, status: Status, error: str | None
+    ) -> StageState:
+        now = _now()
+        with self.lock(run):
+            state = self.read_state(run, stage) or StageState(stage=stage)
+            state.status = status
+            if status == "complete":
+                state.last_retrain_fold = None
+            state.finished = now
+            state.error = error
+            _close_attempt(state, status, now)
+            self.write_state(run, state)
+        _ACTIVE.pop((str(self.resolve(run)), stage), None)
         return state
 
     def complete_stage(self, run: RunKey | str | Path, stage: str) -> StageState:
-        state = self.read_state(run, stage) or StageState(stage=stage)
-        state.status = "complete"
-        state.last_retrain_fold = None
-        state.finished = _now()
-        state.error = None
-        self.write_state(run, state)
-        return state
+        return self._finish(run, stage, "complete", None)
 
     def fail_stage(self, run: RunKey | str | Path, stage: str, error: str) -> StageState:
-        state = self.read_state(run, stage) or StageState(stage=stage)
-        state.status = "failed"
-        state.finished = _now()
-        state.error = error
-        self.write_state(run, state)
-        return state
+        return self._finish(run, stage, "failed", error)
+
+    def interrupt_stage(
+        self, run: RunKey | str | Path, stage: str, reason: str = "interrupted"
+    ) -> StageState:
+        """Mark a stage ``interrupted`` (SIGTERM/SIGUSR1; audit C21).
+
+        Unlike ``failed`` this says nothing about the model: the parts on disk
+        are intact and the next attempt starts the stage again.
+        """
+        return self._finish(run, stage, "interrupted", reason)
 
     def is_complete(
         self,
@@ -651,22 +973,23 @@ class PartWriter:
         path = directory / self.part_name(fold_from, fold_to)
         _atomic_parquet(path, predictions.frame)
 
-        state = self.store.read_state(self.run, self.stage) or StageState(stage=self.stage)
-        state.parts = [p for p in state.parts if p["path"] != path.name]
-        state.parts.append(
-            {
-                "path": path.name,
-                "from": int(fold_from),
-                "to": int(fold_to),
-                "rows": int(len(predictions)),
-            }
-        )
-        state.parts.sort(key=lambda p: int(p["from"]))
-        state.folds_done = int(state.parts[-1]["to"]) + 1
-        state.last_retrain_fold = next_retrain_fold
-        if state.status == "pending":
-            state.status = "running"
-        self.store.write_state(self.run, state)
+        with self.store.lock(self.run):
+            state = self.store.read_state(self.run, self.stage) or StageState(stage=self.stage)
+            state.parts = [p for p in state.parts if p["path"] != path.name]
+            state.parts.append(
+                {
+                    "path": path.name,
+                    "from": int(fold_from),
+                    "to": int(fold_to),
+                    "rows": int(len(predictions)),
+                }
+            )
+            state.parts.sort(key=lambda p: int(p["from"]))
+            state.folds_done = int(state.parts[-1]["to"]) + 1
+            state.last_retrain_fold = next_retrain_fold
+            if state.status == "pending":
+                state.status = "running"
+            self.store.write_state(self.run, state)
         return path
 
 

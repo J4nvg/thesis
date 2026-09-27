@@ -41,11 +41,13 @@ __all__ = [
     "NoopTracker",
     "RunContext",
     "get_spec",
+    "is_noop_tracker",
     "make_fold_hook",
     "make_run_context",
     "make_tracker",
     "resolve_store_root",
     "track",
+    "tracker_tags",
 ]
 
 logger = logging.getLogger(__name__)
@@ -59,11 +61,24 @@ _SPEC_MODULES = (
     "strikecast.models.classifiers",
 )
 
+#: Spec modules the registry does NOT import, loaded here in every case (audit
+#: C15). ``strikecast.models.chronos`` registers ``chronos2_zero_shot`` and
+#: ``chronos2_fine_tuned``; it keeps every AutoGluon import inside functions, so
+#: importing it is free in the main environment. Without this, ``make_jobs
+#: experiment=chronos2`` and the CLI raised ``KeyError: 'chronos2_zero_shot'``.
+_EXTRA_SPEC_MODULES = ("strikecast.models.chronos",)
+
 _specs_loaded = False
 
 
 def _load_spec_modules() -> None:
-    """Import every spec module once, so the registry is populated."""
+    """Import every spec module once, so the registry is populated.
+
+    In ``envs/autogluon`` the registry itself is not importable (it imports
+    ``strikecast.models.classifiers``, which needs ``imbalanced-ensemble``);
+    the per-module fallback below then registers whatever that env can import,
+    which includes both Chronos-2 specs.
+    """
     global _specs_loaded
     if _specs_loaded:
         return
@@ -77,6 +92,11 @@ def _load_spec_modules() -> None:
                 importlib.import_module(name)
             except ImportError as exc:  # a family whose deps are absent
                 logger.debug("spec module %s not importable: %s", name, exc)
+    for name in _EXTRA_SPEC_MODULES:
+        try:
+            importlib.import_module(name)
+        except ImportError as exc:  # pragma: no cover - chronos imports no extra deps
+            logger.debug("spec module %s not importable: %s", name, exc)
     _specs_loaded = True
 
 
@@ -169,6 +189,13 @@ def make_tracker(cfg: ExperimentConfig | Any, **kwargs: Any) -> Any:
     Accepts either an :class:`ExperimentConfig` or a bare ``TrackingConfig``.
     A ``noop`` backend short-circuits without importing anything, which is what
     the tests and the CLI's ``tracking=noop`` override rely on.
+
+    ``TrackingConfig.dir`` and ``TrackingConfig.strict`` are keyword arguments
+    of ``strikecast.tracking.make_tracker`` rather than fields it reads, so they
+    are forwarded here (an explicit ``dir=``/``strict=`` keyword still wins).
+    Both default to the values that preserve current behaviour: no ``dir`` is
+    passed to ``wandb.init`` and a broken mirror disables itself instead of
+    failing the run (§5.5).
     """
     tracking = getattr(cfg, "tracking", cfg)
     if tracking is None or getattr(tracking, "backend", "noop") == "noop":
@@ -178,19 +205,59 @@ def make_tracker(cfg: ExperimentConfig | Any, **kwargs: Any) -> Any:
     except ImportError:
         logger.info("strikecast.tracking is not available; using the no-op tracker")
         return NoopTracker()
+    options: dict[str, Any] = {}
+    directory = getattr(tracking, "dir", None)
+    if directory:
+        options["dir"] = directory
+    if getattr(tracking, "strict", False):
+        options["strict"] = True
+    options.update(kwargs)
     try:
-        return _make(tracking, **kwargs)
+        return _make(tracking, **options)
     except Exception as exc:  # pragma: no cover - a tracker must never fail a run
+        if options.get("strict"):
+            raise
         logger.warning("tracker construction failed (%s); falling back to no-op", exc)
         return NoopTracker()
+
+
+def tracker_tags(cfg: ExperimentConfig | Any, spec: ModelSpec | Any) -> tuple[str, ...]:
+    """``[family, kind]`` from the spec, then ``TrackingConfig.tags`` (§5.5).
+
+    Duplicates are dropped and order is preserved, so adding a tag that the
+    spec already supplies changes nothing.
+    """
+    tags: list[str] = [str(getattr(spec, "family", "")), str(getattr(spec, "kind", ""))]
+    tracking = getattr(cfg, "tracking", cfg)
+    tags.extend(str(t) for t in (getattr(tracking, "tags", None) or ()))
+    seen: dict[str, None] = {}
+    for tag in tags:
+        if tag:
+            seen.setdefault(tag, None)
+    return tuple(seen)
+
+
+def is_noop_tracker(tracker: Any) -> bool:
+    """True for a tracker that records nothing, whoever defines it.
+
+    Both this module's stand-in and ``strikecast.tracking.NoopTracker`` are
+    no-ops, and the second one is what the pipeline actually gets whenever
+    ``strikecast.tracking`` is importable. Recognising both is what keeps
+    ``tracking=noop`` from paying for per-fold scoring nobody reads.
+    """
+    if isinstance(tracker, NoopTracker):
+        return True
+    return getattr(tracker, "name", None) == "noop" or type(tracker).__name__ == "NoopTracker"
 
 
 def make_fold_hook(tracker: Any, metrics_fn: Any, *, prefix: str = "", every: int = 1) -> Any:
     """``TrackerFoldHook`` when Stream C is importable, else ``None``.
 
-    ``None`` is a legal absence: the engine simply gets one hook fewer.
+    ``None`` is a legal absence: the engine simply gets one hook fewer. A no-op
+    tracker gets no hook either -- the hook re-scores every fold it mirrors, and
+    that cost must not be paid for metrics that go nowhere.
     """
-    if isinstance(tracker, NoopTracker):
+    if is_noop_tracker(tracker):
         return None
     try:
         from strikecast.tracking import TrackerFoldHook  # noqa: PLC0415

@@ -351,3 +351,79 @@ def test_a_paradigm_group_that_cannot_compose_stays_a_selector(
         == 0
     )
     assert (store_root / "diff" / "naive_last" / "local" / "seed=42").is_dir()
+
+
+# --------------------------------------------------------------------------- #
+# audit 2026-09-26 C17 / C21: no silent defaults, fold-limited runs, signals
+# --------------------------------------------------------------------------- #
+TUNABLE_YAML = EXPERIMENT_YAML.replace("models:\n  - linear\n", "models:\n  - lightgbm\n  - linear\n")
+
+
+@pytest.fixture
+def tunable_dir(config_dir):
+    (config_dir / "experiment" / "difft.yaml").write_text(TUNABLE_YAML, encoding="utf-8")
+    return config_dir
+
+
+def test_a_tunable_model_without_best_params_is_an_error(tunable_dir, tmp_path, stub_data) -> None:
+    from strikecast.pipeline.run_stage import MissingTunedParams
+
+    store_root = tmp_path / "runs"
+    with pytest.raises(MissingTunedParams, match="--allow-default-params"):
+        _run(tunable_dir, store_root, "run", "experiment=difft", "model=lightgbm",
+             "stage=cv", "seed=42", "tracking=noop")
+    state = RunStore(store_root).read_state(RunKey("diff", "lightgbm", "global", 42), "cv")
+    assert state.status == "failed" and "MissingTunedParams" in state.error
+
+
+def test_allow_default_params_and_max_folds(tunable_dir, tmp_path, stub_data, capsys) -> None:
+    pytest.importorskip("lightgbm")
+    store_root = tmp_path / "runs"
+    code = _run(tunable_dir, store_root, "run", "experiment=difft", "model=lightgbm",
+                "stage=cv", "seed=42", "tracking=noop", "--allow-default-params",
+                "--max-folds", "3")
+    assert code == 0
+    assert "folds=3" in capsys.readouterr().out
+    store = RunStore(store_root)
+    key = RunKey("diff", "lightgbm", "global", 42)
+    state = store.read_state(key, "cv")
+    assert (state.status, state.params_source, state.max_folds, state.folds_done) == (
+        "complete", "defaults", 3, 3,
+    )
+    assert sorted(store.load_predictions(key, "cv").frame["fold"].unique()) == [0, 1, 2]
+
+
+def test_max_folds_is_part_of_the_stage_identity(config_dir, tmp_path, stub_data, capsys) -> None:
+    store_root = tmp_path / "runs"
+    args = ("run", "experiment=diff", "model=linear", "stage=cv", "seed=42", "tracking=noop")
+    _run(config_dir, store_root, *args, "--max-folds", "2")
+    capsys.readouterr()
+    _run(config_dir, store_root, *args)  # the full stage is NOT skipped as "complete"
+    out = capsys.readouterr().out
+    assert "done  diff/linear/global/seed=42/cv" in out
+    state = RunStore(store_root).read_state(RunKey("diff", "linear", "global", 42), "cv")
+    assert state.max_folds is None and state.folds_done > 2
+
+
+def test_sigterm_marks_the_stage_interrupted_and_exits_99(
+    config_dir, tmp_path, stub_data, monkeypatch
+) -> None:
+    import os
+    import signal
+
+    from strikecast.pipeline import run_stage
+
+    def killed(**kwargs):
+        os.kill(os.getpid(), signal.SIGTERM)  # what SLURM does at the wall clock
+        raise AssertionError("the handler should have raised")
+
+    monkeypatch.setattr(run_stage, "_run_backtest", killed)
+    before = signal.getsignal(signal.SIGTERM)
+    store_root = tmp_path / "runs"
+    code = _run(config_dir, store_root, "run", "experiment=diff", "model=linear", "stage=cv",
+                "seed=42", "tracking=noop")
+    assert code == 99
+    state = RunStore(store_root).read_state(RunKey("diff", "linear", "global", 42), "cv")
+    assert state.status == "interrupted" and "SIGTERM" in state.error
+    assert state.attempts[-1]["outcome"] == "interrupted"
+    assert signal.getsignal(signal.SIGTERM) is before  # handlers restored after main()

@@ -10,7 +10,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from strikecast.config.schema import SeriesConfig, SplitConfig, halflife_to_alpha
+from strikecast.config.schema import (
+    SeriesConfig,
+    SplitConfig,
+    WindowTransformConfig,
+    halflife_to_alpha,
+)
 from strikecast.data import series as S
 
 N_DAYS = 100
@@ -90,12 +95,108 @@ def test_window_transform_component_counts(bundle: S.SeriesBundle) -> None:
     assert bundle.future_covs[0].n_components == len(FUTURE_COVS)
 
 
-def test_default_window_transform_alpha() -> None:
-    transforms = SeriesConfig().window.transforms
+def test_legacy_window_transform_alpha() -> None:
+    """``legacy_alpha`` is the thesis' list bit for bit (A1: the buggy filter)."""
+    transforms = SeriesConfig(window=WindowTransformConfig(expdecay="legacy_alpha")).window.transforms
     assert [t["function_name"] for t in transforms] == [
         "rsum14", "rsum7", "rmean7", "rmean28", "ewma14", "expdecay7",
     ]
-    assert transforms[-1]["alpha"] == halflife_to_alpha(7)
+    assert transforms[-1] == {
+        "function": "mean", "mode": "ewm", "alpha": halflife_to_alpha(7),
+        "function_name": "expdecay7",
+    }
+
+
+def test_default_window_transform_is_the_leaky_integrator() -> None:
+    """Decision D1: the schema default is the FIXED filter, named ``leaky7``."""
+    window = SeriesConfig().window
+    assert window.expdecay == "leaky"
+    assert [t["function_name"] for t in window.transforms] == [
+        "rsum14", "rsum7", "rmean7", "rmean28", "ewma14", "leaky7",
+    ]
+    assert window.transforms[-1] == {
+        "function": "sum", "mode": "ewm", "halflife": 7.0, "function_name": "leaky7",
+    }
+    # the first five transforms do not depend on the mode
+    legacy = WindowTransformConfig(expdecay="legacy_alpha")
+    assert window.transforms[:5] == legacy.transforms[:5]
+
+
+def _apply_expdecay(mode: str, values: np.ndarray) -> np.ndarray:
+    from darts import TimeSeries  # noqa: PLC0415
+    from darts.dataprocessing.transformers import WindowTransformer  # noqa: PLC0415
+
+    window = WindowTransformConfig(expdecay=mode)  # type: ignore[arg-type]
+    kwargs = window.transformer_kwargs()
+    kwargs["transforms"] = [window.transforms[-1]]
+    index = pd.date_range("2022-01-01", periods=len(values), freq="D")
+    ts = TimeSeries.from_times_and_values(index, values, columns=["x"])
+    out = WindowTransformer(**kwargs).transform(ts)
+    name = window.transforms[-1]["function_name"]
+    (column,) = [c for c in out.components if name in c]
+    return out[column].values().ravel()
+
+
+def _leaky_recursion(values: np.ndarray) -> np.ndarray:
+    decay = 2 ** (-1 / 7)
+    out, state = np.zeros_like(values), 0.0
+    for t, x in enumerate(values):
+        state = x + decay * state
+        out[t] = state
+    return out
+
+
+def test_leaky7_is_the_literal_leaky_integrator() -> None:
+    """``s_t = x_t + 2^(-1/7) s_{t-1}``, ``s_{-1} = 0``, EXACTLY (not approx)."""
+    impulse = np.zeros(60)
+    impulse[3] = 1.0
+    got = _apply_expdecay("leaky", impulse)
+    np.testing.assert_array_equal(got, _leaky_recursion(impulse))
+    # the thesis' impulse response: 1 on the day, 0.906 a day later, 0.5 after 7 days
+    assert got[3] == 1.0
+    assert got[4] == pytest.approx(0.9057236642639067, abs=1e-15)
+    assert got[10] == pytest.approx(0.5, abs=1e-12)
+
+    rng = np.random.default_rng(7)
+    noise = rng.poisson(2.0, 200).astype(float) * rng.random(200) + 3.0
+    np.testing.assert_array_equal(_apply_expdecay("leaky", noise), _leaky_recursion(noise))
+
+
+def test_legacy_expdecay7_is_almost_the_raw_series() -> None:
+    """The legacy filter weights TODAY with alpha=0.906 (A1): 0.906, 0.085, ~0."""
+    impulse = np.zeros(30)
+    impulse[3] = 1.0
+    got = _apply_expdecay("legacy_alpha", impulse)
+    assert got[3] == pytest.approx(0.906, abs=1e-3)  # adjust=True start-up
+    assert got[4] == pytest.approx(0.0854, abs=1e-3)
+    assert got[10] < 1e-6
+
+
+def test_window_transforms_must_agree_with_expdecay() -> None:
+    legacy = WindowTransformConfig(expdecay="legacy_alpha").transforms
+    with pytest.raises(ValueError, match="legacy_alpha"):
+        WindowTransformConfig(expdecay="leaky", transforms=legacy)
+    tampered = [*legacy[:5], {**legacy[5], "alpha": 0.5}]
+    with pytest.raises(ValueError, match="differs"):
+        WindowTransformConfig(expdecay="legacy_alpha", transforms=tampered)
+    # an explicit, consistent list is accepted and a JSON round trip is stable
+    window = WindowTransformConfig(expdecay="legacy_alpha", transforms=legacy)
+    assert WindowTransformConfig(**window.model_dump(mode="json")) == window
+
+
+def test_expdecay_mode_changes_every_identity() -> None:
+    """The resolved config hash (stage identity) differs between the modes."""
+    from strikecast.config.schema import ExperimentConfig  # noqa: PLC0415
+
+    leaky = ExperimentConfig(name="count")
+    legacy = ExperimentConfig(
+        name="count", series=SeriesConfig(window=WindowTransformConfig(expdecay="legacy_alpha"))
+    )
+    assert leaky.resolved_hash() != legacy.resolved_hash()
+    for cfg in (leaky, legacy):
+        again = ExperimentConfig(**cfg.model_dump(mode="json"))
+        assert again.resolved_hash() == cfg.resolved_hash()
+        assert again.series.window.expdecay == cfg.series.window.expdecay
 
 
 def test_split_config_derived_fractions() -> None:

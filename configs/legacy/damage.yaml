@@ -1,0 +1,11 @@
+# @package _global_
+# Thesis-faithful feature mode for the DAMAGE family (audit 2026-09-26 A1, D1/D2).
+#
+#   strikecast featsel experiment=damage legacy=damage      # once
+#   strikecast run     experiment=damage legacy=damage ...
+#
+# Only the window transform is legacy; the per-key selections are made once,
+# deterministically, on the legacy expdecay7 columns (no thesis cache exists).
+series:
+  window:
+    expdecay: legacy_alpha

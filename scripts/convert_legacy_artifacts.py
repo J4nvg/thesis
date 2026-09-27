@@ -88,7 +88,7 @@ def ts_frame(series, region: str) -> pd.DataFrame:
 
 def concat_regions(series_list, region_names) -> pd.DataFrame:
     return pd.concat(
-        [ts_frame(s, r) for s, r in zip(series_list, region_names)],
+        [ts_frame(s, r) for s, r in zip(series_list, region_names, strict=False)],
         ignore_index=True,
     )
 
@@ -247,7 +247,7 @@ def convert_feature_set(job, force: bool) -> str:
 
     target_full = [
         tr.append(vl).append(te)
-        for tr, vl, te in zip(train_target, val_target, test_target)
+        for tr, vl, te in zip(train_target, val_target, test_target, strict=False)
     ]
     concat_regions(target_full, region_names).to_parquet(
         out_dir / "target_full.parquet", index=False)
@@ -384,7 +384,7 @@ def run_check(golden: Path) -> int:
     jobs = discover(golden)
     missing = []
     total = 0
-    for category, items in jobs.items():
+    for _category, items in jobs.items():
         for job in items:
             for exp in job["expected"]:
                 total += 1

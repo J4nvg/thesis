@@ -30,12 +30,29 @@ The feature selection is **data to load, not output to reproduce** (F16): the
 legacy sets came out of a process whose ``PYTHONHASHSEED`` is unknowable. Point
 ``feature_selection.cache_path`` at a converted golden set to run the thesis'
 own features; leave it unset to select afresh under ``PYTHONHASHSEED=0``.
+
+Audit 2026-09-26 (A12-A14, D2) adds three guards:
+
+* every selection this module writes records its **provenance** (window
+  config, selector config, upstream hashes, ``PYTHONHASHSEED``, library
+  versions), and a cached selection -- ``cache_path`` or the store -- made under
+  a different window/selector config is REFUSED (:class:`FeatureCacheMismatch`).
+  The converted golden JSONs carry no provenance and are accepted only under
+  ``series.window.expdecay = "legacy_alpha"`` and for their own selector;
+* ``feature_selection.require_cached`` makes the selection a separate step
+  (``strikecast featsel experiment=<name>``, :func:`select_features`); every
+  other caller then loads it and fails loudly when it is missing
+  (:class:`FeatureSelectionMissing`) instead of re-selecting per job;
+* the panel hash covers the **content** of the four input files, not only
+  their paths, so an edited parquet can never reuse a stale panel.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -52,15 +69,34 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from strikecast.data.series import SeriesBundle
 
 __all__ = [
+    "CompositeData",
     "DataArtifacts",
+    "FeatureCacheMismatch",
+    "FeatureSelectionMissing",
     "FeatureSets",
     "build_or_load_bundle",
     "build_or_load_features",
     "build_or_load_panel",
+    "head_configs",
+    "is_composite_family",
+    "prepare_composite_data",
+    "check_selection_provenance",
+    "input_digests",
     "prepare_data",
+    "require_pythonhashseed_zero",
+    "select_features",
+    "selection_provenance",
 ]
 
 logger = logging.getLogger(__name__)
+
+
+class FeatureSelectionMissing(RuntimeError):  # noqa: N818 - reads better at the raise site
+    """``feature_selection.require_cached`` is on and no cached selection exists."""
+
+
+class FeatureCacheMismatch(ValueError):  # noqa: N818
+    """A cached selection was made under a different window/selector config (A13)."""
 
 
 # --------------------------------------------------------------------------- #
@@ -108,11 +144,109 @@ class DataArtifacts:
         return (self.panel_hash, self.series_hash, self.features.hash)
 
 
+@dataclass(frozen=True)
+class CompositeData(DataArtifacts):
+    """One :class:`DataArtifacts` per head, for the hurdle and damage families.
+
+    The hurdle family builds **two** panels and two bundles -- the unbinarised
+    count panel for the CatBoost head and the binarised event panel for the SPE
+    classifier -- and runs **two** feature selections (F27,
+    ``final_hurdle.ipynb`` cells 3, 10 and 11). The damage family builds one
+    panel, one bundle and one selection **per damage key**
+    (``damage_classifier.ipynb`` cells 4, 12 and 13).
+
+    ``CompositeData`` is a :class:`DataArtifacts` in its own right: the inherited
+    fields are the PRIMARY head's, so everything that already consumes a
+    ``DataArtifacts`` -- ``run_experiment``, the naive scales, the region names,
+    the activity partition -- keeps working unchanged. :attr:`heads` is what
+    :mod:`strikecast.pipeline.composite_stage` reads.
+
+    The primary head is the one the family's headline numbers are scaled and
+    partitioned on: the ``regressor`` head for the hurdle (its count targets are
+    what ``compute_naive_scales`` runs on, ``final_hurdle.ipynb`` cell 17) and
+    the FIRST damage key for the damage family (the key both legacy loops take
+    their schedule from, F68).
+    """
+
+    heads: dict[str, DataArtifacts] = field(default_factory=dict)
+    primary: str = ""
+    family: str = ""
+
+    def head(self, name: str) -> DataArtifacts:
+        try:
+            return self.heads[name]
+        except KeyError:
+            raise KeyError(
+                f"no head {name!r} in this {self.family or 'composite'} data; "
+                f"known: {sorted(self.heads)}"
+            ) from None
+
+    @property
+    def head_names(self) -> list[str]:
+        return list(self.heads)
+
+    @property
+    def bundles(self) -> dict[str, Any]:
+        """``head -> post-selection SeriesBundle``, in head order."""
+        return {name: art.bundle for name, art in self.heads.items()}
+
+    @property
+    def upstream(self) -> tuple[str, ...]:  # type: ignore[override]
+        """EVERY head's three hashes, head-major, so the stage identity moves
+        when any panel, bundle or selection of any head moves."""
+        out: list[str] = []
+        for name, art in self.heads.items():
+            out.extend((name, *art.upstream))
+        return tuple(out)
+
+
 # --------------------------------------------------------------------------- #
 # hashes
 # --------------------------------------------------------------------------- #
+#: The four files ``strikecast.data.load.load_inputs`` reads, relative to
+#: ``data.fixed_dir`` / ``data.dataset_dir``.
+INPUT_FILES: tuple[tuple[str, str], ...] = (
+    ("fixed_dir", "regions.txt"),
+    ("fixed_dir", "regions_activity_cat.json"),
+    ("fixed_dir", "actors.json"),
+    ("dataset_dir", "master_combined_timeseries.parquet"),
+)
+
+_FILE_DIGESTS: dict[tuple[str, int, int], str] = {}
+
+
+def _file_sha256(path: Path) -> str | None:
+    """sha256 of one file (memoised on path, size and mtime); ``None`` if absent."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    key = (str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns))
+    cached = _FILE_DIGESTS.get(key)
+    if cached is None:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        cached = _FILE_DIGESTS[key] = digest.hexdigest()
+    return cached
+
+
+def input_digests(cfg: ExperimentConfig) -> dict[str, str | None]:
+    """``file name -> sha256`` of the panel's input files (A14).
+
+    A missing file hashes to ``None`` (unit tests pass in-memory inputs), so the
+    digest is still deterministic.
+    """
+    out: dict[str, str | None] = {}
+    for attr, name in INPUT_FILES:
+        out[name] = _file_sha256(Path(getattr(cfg.data, attr)).expanduser() / name)
+    return out
+
+
 def _panel_hash(cfg: ExperimentConfig) -> str:
-    return content_hash("panel", cfg.data.model_dump(mode="json"))
+    """Config slice AND input-file content (A14): a changed parquet is a new panel."""
+    return content_hash("panel", cfg.data.model_dump(mode="json"), input_digests(cfg))
 
 
 def _series_hash(cfg: ExperimentConfig, panel_hash: str) -> str:
@@ -131,6 +265,101 @@ def _features_hash(cfg: ExperimentConfig, panel_hash: str, series_hash: str) -> 
 
 def _store_for(cfg: ExperimentConfig, store: RunStore | None) -> RunStore:
     return store if store is not None else RunStore(resolve_store_root(cfg))
+
+
+# --------------------------------------------------------------------------- #
+# composite families: one head per panel
+# --------------------------------------------------------------------------- #
+#: The head whose artefacts a :class:`CompositeData` exposes as its own.
+HURDLE_PRIMARY_HEAD = "regressor"
+
+#: The ``feature_selections`` keys the hurdle family's two selections use
+#: (``configs/experiment/hurdle.yaml``; F27).
+HURDLE_HEADS: tuple[str, str] = ("regressor", "classifier")
+
+#: The selector that is fitted with positive-only sample weights (F27, Q7):
+#: ``final_hurdle.ipynb`` cell 10 is the only selection in the whole code base
+#: that passes ``sample_weight``.
+WEIGHTED_SELECTOR = "zipoisson_regressor"
+
+
+def is_composite_family(cfg: ExperimentConfig) -> bool:
+    """Does this experiment need more than one panel?
+
+    Decided from the CONFIG SHAPE, never from the experiment name:
+
+    * ``data.panel_variant == "damage"`` -- the late-binarisation variant
+      produces one frame per ``data.binarize`` entry, so every entry is a head;
+    * ``feature_selections`` naming both hurdle heads -- two selections means
+      two covariate subsets, which means two bundles (F27).
+    """
+    if cfg.data.panel_variant == "damage":
+        return True
+    return all(head in cfg.feature_selections for head in HURDLE_HEADS)
+
+
+def head_configs(cfg: ExperimentConfig) -> dict[str, ExperimentConfig]:
+    """``head -> the single-panel config that builds that head's artefacts``.
+
+    Each head is an ordinary :class:`ExperimentConfig` with ``data`` and
+    ``feature_selection`` narrowed to that head, so the whole existing data
+    stage -- panel, bundle, selection, subset -- runs unchanged per head and
+    each artefact lands in the SAME ``shared/`` directory under its own content
+    hash (the hash covers ``data`` and ``feature_selection``, which is exactly
+    what differs).
+
+    Hurdle (``final_hurdle.ipynb`` cell 3)::
+
+        regressor   target=<T>          binarize=[]     selection=zipoisson_regressor
+        classifier  target=<T>_binary   binarize=[<T>]  selection=zipoisson_classifier
+
+    Damage (``damage_classifier.ipynb`` cells 4 and 12): one head per entry of
+    ``data.binarize``, each ``target=<key>_binary`` with ``binarize=[key]`` and
+    the shared ``zipoisson_classifier`` selection re-fitted per key.
+
+    A non-composite experiment returns ``{"": cfg}`` -- one unnamed head, which
+    is what :func:`prepare_data` already builds.
+    """
+    if not is_composite_family(cfg):
+        return {"": cfg}
+
+    if cfg.data.panel_variant == "damage":
+        if not cfg.data.binarize:
+            raise ValueError(
+                f"experiment {cfg.name!r} is the damage panel variant but lists no "
+                "`data.binarize` targets; there is nothing to build a head from"
+            )
+        return {
+            key: cfg.model_copy(
+                update={
+                    "data": cfg.data.model_copy(
+                        update={"target": f"{key}_binary", "binarize": [key]}
+                    ),
+                    "feature_selection": cfg.feature_selection_for(key),
+                }
+            )
+            for key in cfg.data.binarize
+        }
+
+    target = cfg.data.target
+    if not target:
+        raise ValueError(f"experiment {cfg.name!r} needs `data.target` for its hurdle heads")
+    return {
+        "regressor": cfg.model_copy(
+            update={
+                "data": cfg.data.model_copy(update={"target": target, "binarize": []}),
+                "feature_selection": cfg.feature_selection_for("regressor"),
+            }
+        ),
+        "classifier": cfg.model_copy(
+            update={
+                "data": cfg.data.model_copy(
+                    update={"target": f"{target}_binary", "binarize": [target]}
+                ),
+                "feature_selection": cfg.feature_selection_for("classifier"),
+            }
+        ),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -178,9 +407,11 @@ def build_or_load_panel(
         binarize_stage=cfg.data.binarize_stage,
     )
     if len(result.panels) != 1:
-        raise NotImplementedError(
-            f"experiment {cfg.name!r} produced {len(result.panels)} panels; the multi-target "
-            "damage family is P5, not P3"
+        raise ValueError(
+            f"experiment {cfg.name!r} produced {len(result.panels)} panels from "
+            f"data.binarize={list(cfg.data.binarize)}; one panel is one cache entry, "
+            "so a multi-target family must go through head_configs()/"
+            "prepare_composite_data(), which narrows data.binarize to one key per head"
         )
     panel = result.panel
 
@@ -259,14 +490,163 @@ def _sets_from_payload(payload: dict[str, Any]) -> tuple[list[str], list[str]] |
     ``FeatureSelection.to_json`` writes ``past_keep``/``future_keep``; the
     converted legacy sets under ``golden/converted/feature_sets/`` write
     ``past_covariate_components``/``future_covariate_components``.
+
+    **The recorded order is kept, never sorted** (F16). ``subset_components``
+    iterates these names exactly as given and the resulting TimeSeries
+    component order is the column order the GBDTs are fitted on, so sorting
+    them re-orders every lagged feature and changes LightGBM's tie-breaking:
+    measured on the real diff panel, sorting moved the CV ``MASE_mean`` of
+    ``lightgbm`` by 6.9% against ``golden/results/diff``, while keeping the
+    order reproduces it to 1e-9 (level E, ``tests/golden/test_pipeline_equality.py``).
+    The cached names are data to load, and their order is part of that data.
     """
     for past_key, future_key in (
         ("past_keep", "future_keep"),
         ("past_covariate_components", "future_covariate_components"),
     ):
         if past_key in payload and future_key in payload:
-            return sorted(payload[past_key]), sorted(payload[future_key])
+            return list(payload[past_key]), list(payload[future_key])
     return None
+
+
+def _selection_sample_weight(
+    cfg: ExperimentConfig, bundle: SeriesBundle
+) -> list[Any] | None:
+    """``final_hurdle.ipynb`` cell 10's ``sample_weight``, or ``None`` (F27/Q7).
+
+    ``full_weights`` there is ``make_positive_only_weights(target_series_list_r)``
+    -- the UN-ENCODED full target list -- and every weight series is then
+    ``slice_intersect``ed with the training target it belongs to.
+    """
+    if cfg.feature_selection.selector != WEIGHTED_SELECTOR:
+        return None
+
+    from strikecast.data.series import positive_only_weights  # noqa: PLC0415
+
+    source = bundle.raw.target if bundle.raw is not None else bundle.target_full
+    weights = positive_only_weights(source)
+    return [
+        w.slice_intersect(ts) for w, ts in zip(weights, bundle.target_train, strict=True)
+    ]
+
+
+def _fs_identity(fs: Any) -> dict[str, Any]:
+    """The feature-selection fields that change WHICH features are selected.
+
+    ``cache``, ``cache_path``, ``require_cached`` and ``per_key`` say where a
+    selection lives, not what it is, and are left out.
+    """
+    return fs.model_dump(
+        mode="json", include={"selector", "device", "num_threads", "top_k", "deterministic"}
+    )
+
+
+def _library_versions() -> dict[str, str | None]:
+    from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+
+    out: dict[str, str | None] = {}
+    for package in ("lightgbm", "darts", "pandas", "numpy"):
+        try:
+            out[package] = version(package)
+        except PackageNotFoundError:
+            out[package] = None
+    return out
+
+
+def selection_provenance(
+    cfg: ExperimentConfig, panel_hash: str, series_hash: str, digest: str
+) -> dict[str, Any]:
+    """What a cached selection records about how it was made (A13).
+
+    ``window``, ``feature_selection`` (:func:`_fs_identity`), ``common_kwargs``
+    and ``target`` are what :func:`check_selection_provenance` compares; the
+    rest is for the reader.
+    """
+    return {
+        "schema": 1,
+        "experiment": cfg.name,
+        "target": cfg.data.target,
+        "expdecay": cfg.series.window.expdecay,
+        "window": cfg.series.window.model_dump(mode="json"),
+        "feature_selection": _fs_identity(cfg.feature_selection),
+        "common_kwargs": cfg.common_kwargs.model_dump(mode="json"),
+        "panel_hash": panel_hash,
+        "series_hash": series_hash,
+        "features_hash": digest,
+        "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
+        "versions": _library_versions(),
+    }
+
+
+def check_selection_provenance(
+    cfg: ExperimentConfig, payload: dict[str, Any], source: Path | str
+) -> None:
+    """Refuse a cached selection made under another window/selector config (A13).
+
+    * A payload WITH ``provenance`` must match this run's window config,
+      selector identity, lag skeleton and target exactly.
+    * A payload WITHOUT it is a converted thesis set
+      (``golden/converted/feature_sets/*.json``): those were selected on the
+      legacy ``expdecay7`` columns, so they are accepted only under
+      ``series.window.expdecay = "legacy_alpha"``, and only for the selector
+      (``name``) and target they were made for.
+
+    Raises :class:`FeatureCacheMismatch`.
+    """
+    window = cfg.series.window
+    provenance = payload.get("provenance")
+    if provenance is None:
+        if window.expdecay != "legacy_alpha":
+            raise FeatureCacheMismatch(
+                f"{source} is a thesis feature selection without provenance: it was made on "
+                "the LEGACY expdecay7 window features and is only valid with "
+                f"series.window.expdecay=legacy_alpha (this run: {window.expdecay!r}). Use "
+                f"`legacy={cfg.name}` to reproduce the thesis, or run `strikecast featsel "
+                f"experiment={cfg.name}` to select on the current features (audit A13)."
+            )
+        name = payload.get("name")
+        if name and not str(cfg.feature_selection.selector).startswith(str(name)):
+            raise FeatureCacheMismatch(
+                f"{source} is the {name!r} selection but this run's selector is "
+                f"{cfg.feature_selection.selector!r}"
+            )
+        targets = payload.get("target_components")
+        if targets and cfg.data.target not in targets:
+            raise FeatureCacheMismatch(
+                f"{source} was selected for target(s) {targets}, not {cfg.data.target!r}"
+            )
+        return
+
+    expected = {
+        "window": window.model_dump(mode="json"),
+        "feature_selection": _fs_identity(cfg.feature_selection),
+        "common_kwargs": cfg.common_kwargs.model_dump(mode="json"),
+        "target": cfg.data.target,
+    }
+    diffs = [key for key, want in expected.items() if provenance.get(key) != want]
+    if diffs:
+        detail = "; ".join(
+            f"{key}: cached {provenance.get(key)!r} != run {expected[key]!r}" for key in diffs
+        )
+        raise FeatureCacheMismatch(
+            f"{source} was selected under a different configuration ({detail}). Re-run "
+            f"`strikecast featsel experiment={cfg.name}` for this configuration (audit A13)."
+        )
+
+
+def require_pythonhashseed_zero(what: str = "feature selection") -> None:
+    """Hard-fail unless ``PYTHONHASHSEED=0`` (F16, A12, D2).
+
+    The upstream covariate column order -- and so LightGBM's tie-breaking --
+    depends on the hash seed; a selection made under another seed is a
+    different selection.
+    """
+    seed = os.environ.get("PYTHONHASHSEED")
+    if seed != "0":
+        raise RuntimeError(
+            f"{what} requires PYTHONHASHSEED=0 (got {seed!r}); the covariate column order "
+            "depends on the hash seed (F16). Re-run as `PYTHONHASHSEED=0 strikecast ...`."
+        )
 
 
 def build_or_load_features(
@@ -277,6 +657,7 @@ def build_or_load_features(
     panel_hash: str | None = None,
     series_hash: str | None = None,
     force: bool = False,
+    compute: bool | None = None,
 ) -> FeatureSets:
     """The selected covariate components, from cache or from a fresh ranking.
 
@@ -285,9 +666,20 @@ def build_or_load_features(
     1. ``feature_selection.cache_path`` -- the converted legacy set. This is the
        only way to reproduce the thesis' own features (F16), so it wins over
        everything.
-    2. ``shared/feature_selection.<hash>.json`` written by a previous run, when
-       ``feature_selection.cache`` is on.
-    3. a fresh :func:`strikecast.data.feature_selection.select_top_k`.
+    2. ``shared/feature_selection.<hash>.json`` written by a previous run
+       (typically ``strikecast featsel``), when ``feature_selection.cache`` is on.
+    3. a fresh :func:`strikecast.data.feature_selection.select_top_k` -- only
+       when ``compute`` allows it. ``compute=None`` (the default) means "unless
+       ``feature_selection.require_cached``"; the ``featsel`` command passes
+       ``True``. Otherwise a missing cache raises :class:`FeatureSelectionMissing`.
+
+    Both caches go through :func:`check_selection_provenance` (A13).
+
+    The ``zipoisson_regressor`` selector is fitted with **positive-only sample
+    weights** (F27, Q7): ``final_hurdle.ipynb`` cell 10 is the only selection in
+    the whole code base that passes ``sample_weight``, and it passes
+    ``[w.slice_intersect(ts) for w, ts in zip(full_weights, train_target_r)]``.
+    Reproduced here from the bundle's own lists, so a caller cannot forget it.
     """
     store = _store_for(cfg, store)
     panel_hash = panel_hash or _panel_hash(cfg)
@@ -303,7 +695,9 @@ def build_or_load_features(
                 f"feature_selection.cache_path={cache_path!r} does not exist; unset it to "
                 "select features afresh (F16)"
             )
-        sets = _sets_from_payload(json.loads(legacy.read_text(encoding="utf-8")))
+        payload = json.loads(legacy.read_text(encoding="utf-8"))
+        check_selection_provenance(cfg, payload, legacy)
+        sets = _sets_from_payload(payload)
         if sets is None:
             raise ValueError(
                 f"{legacy} holds neither past_keep/future_keep nor "
@@ -313,10 +707,25 @@ def build_or_load_features(
         return FeatureSets(sets[0], sets[1], "cache_path", digest, legacy)
 
     if cfg.feature_selection.cache and not force and path.exists():
-        sets = _sets_from_payload(json.loads(path.read_text(encoding="utf-8")))
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        check_selection_provenance(cfg, payload, path)
+        sets = _sets_from_payload(payload)
         if sets is not None:
             logger.info("feature selection: cache hit %s", path)
             return FeatureSets(sets[0], sets[1], "store", digest, path)
+
+    allowed = (not cfg.feature_selection.require_cached) if compute is None else compute
+    if not allowed:
+        raise FeatureSelectionMissing(
+            f"no cached feature selection for experiment {cfg.name!r} (target "
+            f"{cfg.data.target!r}, selector {cfg.feature_selection.selector!r}, "
+            f"expdecay {cfg.series.window.expdecay!r}) at {path}. "
+            "feature_selection.require_cached is on, so cv/tune/test never re-select: run "
+            f"`PYTHONHASHSEED=0 strikecast featsel experiment={cfg.name}` (with the same "
+            "overrides and --store-root) first (audit A12/D2)."
+        )
+    if cfg.feature_selection.deterministic:
+        require_pythonhashseed_zero()
 
     from strikecast.data.feature_selection import select_top_k  # noqa: PLC0415
 
@@ -325,9 +734,12 @@ def build_or_load_features(
         bundle.past_covs,
         bundle.future_covs,
         cfg.feature_selection.build(),
+        sample_weight=_selection_sample_weight(cfg, bundle),
     )
     if cfg.feature_selection.cache:
-        selection.to_json(path)
+        selection.to_json(
+            path, provenance=selection_provenance(cfg, panel_hash, series_hash, digest)
+        )
         logger.info("feature selection: wrote %s", path)
     return FeatureSets(
         list(selection.past_keep),
@@ -336,6 +748,67 @@ def build_or_load_features(
         digest,
         path if cfg.feature_selection.cache else None,
     )
+
+
+def select_features(
+    cfg: ExperimentConfig,
+    store: RunStore | None = None,
+    *,
+    inputs: Inputs | None = None,
+    force: bool = False,
+) -> dict[str, FeatureSets]:
+    """``strikecast featsel``: compute and cache every head's selection ONCE.
+
+    One selection per family (count, diff), per head (hurdle: ``regressor``,
+    ``classifier``) or per damage key, each written to
+    ``<store>/<experiment>/shared/feature_selection.<hash>.json`` with its
+    provenance. Existing selections are loaded (and provenance-checked), not
+    recomputed, unless ``force``. Requires ``PYTHONHASHSEED=0`` whatever the
+    ``deterministic`` flag says (A12, D2). Returns ``head -> FeatureSets``
+    (head ``""`` for a single-selection family).
+    """
+    require_pythonhashseed_zero("`strikecast featsel`")
+    store = _store_for(cfg, store)
+    if inputs is None:
+        from strikecast.data.load import load_inputs  # noqa: PLC0415
+
+        inputs = load_inputs(cfg.data.fixed_dir, cfg.data.dataset_dir)
+
+    out: dict[str, FeatureSets] = {}
+    for name, head_cfg in head_configs(cfg).items():
+        if not head_cfg.feature_selection.cache and not head_cfg.feature_selection.cache_path:
+            raise ValueError(
+                f"experiment {cfg.name!r} head {name!r}: feature_selection.cache is off, so "
+                "a precomputed selection could never be read back"
+            )
+        panel, weather_cols, panel_hash = build_or_load_panel(head_cfg, store, inputs=inputs)
+        bundle, series_hash = build_or_load_bundle(
+            head_cfg,
+            store,
+            panel,
+            weather_cols,
+            dict(inputs.activity_by_region),
+            panel_hash=panel_hash,
+        )
+        out[name] = build_or_load_features(
+            head_cfg,
+            store,
+            bundle,
+            panel_hash=panel_hash,
+            series_hash=series_hash,
+            force=force,
+            compute=True,
+        )
+        logger.info(
+            "featsel %s head %r: %s (%d past, %d future) -> %s",
+            cfg.name,
+            name,
+            out[name].source,
+            len(out[name].past_keep),
+            len(out[name].future_keep),
+            out[name].path,
+        )
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -349,8 +822,112 @@ def prepare_data(
     cache: bool = True,
     force: bool = False,
     keep_panel: bool = False,
+    compute_features: bool | None = None,
 ) -> DataArtifacts:
-    """Run the whole data stage and return everything downstream needs."""
+    """Run the whole data stage and return everything downstream needs.
+
+    ``compute_features`` is :func:`build_or_load_features`' ``compute``: ``None``
+    computes a missing selection unless ``feature_selection.require_cached``.
+
+    A composite family (hurdle, damage -- see :func:`is_composite_family`) gets a
+    :class:`CompositeData`, which IS a :class:`DataArtifacts` carrying the
+    primary head's artefacts plus every head under ``.heads``. Callers that only
+    need one bundle therefore need no change.
+    """
+    if cfg.data.panel_variant == "chronos":
+        # Audit C15: Chronos-2 takes the AutoGluon frame -- no darts bundle, no
+        # feature selection, no window features (F28, F123).
+        from strikecast.pipeline.chronos_stage import prepare_chronos_data  # noqa: PLC0415
+
+        return prepare_chronos_data(cfg, store, inputs=inputs)
+    if is_composite_family(cfg):
+        return prepare_composite_data(
+            cfg,
+            store,
+            inputs=inputs,
+            cache=cache,
+            force=force,
+            keep_panel=keep_panel,
+            compute_features=compute_features,
+        )
+    return _prepare_one(
+        cfg,
+        store,
+        inputs=inputs,
+        cache=cache,
+        force=force,
+        keep_panel=keep_panel,
+        compute_features=compute_features,
+    )
+
+
+def prepare_composite_data(
+    cfg: ExperimentConfig,
+    store: RunStore | None = None,
+    *,
+    inputs: Inputs | None = None,
+    cache: bool = True,
+    force: bool = False,
+    keep_panel: bool = False,
+    compute_features: bool | None = None,
+) -> CompositeData:
+    """Run the data stage once per head and collect the results.
+
+    Every head goes through the SAME ``shared/`` cache; the hashes differ
+    because :func:`head_configs` narrows ``data`` and ``feature_selection`` per
+    head and both are hashed. Two runs of the same head therefore hit the cache,
+    and no head can ever read another head's panel.
+
+    ``inputs`` is loaded once and reused by every head: ``load_inputs`` reads
+    three small files and ``build_panel`` never mutates what it is given (panel
+    quirk Q1).
+    """
+    store = _store_for(cfg, store)
+    heads = head_configs(cfg)
+    if inputs is None:
+        from strikecast.data.load import load_inputs  # noqa: PLC0415
+
+        inputs = load_inputs(cfg.data.fixed_dir, cfg.data.dataset_dir)
+
+    built: dict[str, DataArtifacts] = {}
+    for name, head_cfg in heads.items():
+        logger.info("data stage: head %r (target %r)", name, head_cfg.data.target)
+        built[name] = _prepare_one(
+            head_cfg,
+            store,
+            inputs=inputs,
+            cache=cache,
+            force=force,
+            keep_panel=keep_panel,
+            compute_features=compute_features,
+        )
+
+    primary = HURDLE_PRIMARY_HEAD if HURDLE_PRIMARY_HEAD in built else next(iter(built))
+    lead = built[primary]
+    return CompositeData(
+        bundle=lead.bundle,
+        features=lead.features,
+        panel_hash=lead.panel_hash,
+        series_hash=lead.series_hash,
+        activity_by_region=dict(lead.activity_by_region),
+        panel=lead.panel,
+        heads=built,
+        primary=primary,
+        family=cfg.name,
+    )
+
+
+def _prepare_one(
+    cfg: ExperimentConfig,
+    store: RunStore | None = None,
+    *,
+    inputs: Inputs | None = None,
+    cache: bool = True,
+    force: bool = False,
+    keep_panel: bool = False,
+    compute_features: bool | None = None,
+) -> DataArtifacts:
+    """The single-panel data stage: panel -> bundle -> selection -> subset."""
     from strikecast.data.series import subset_components  # noqa: PLC0415
 
     store = _store_for(cfg, store)
@@ -379,7 +956,13 @@ def prepare_data(
         force=force,
     )
     features = build_or_load_features(
-        cfg, store, bundle, panel_hash=panel_hash, series_hash=series_hash, force=force
+        cfg,
+        store,
+        bundle,
+        panel_hash=panel_hash,
+        series_hash=series_hash,
+        force=force,
+        compute=compute_features,
     )
     selected = subset_components(bundle, features.past_keep, features.future_keep)
 

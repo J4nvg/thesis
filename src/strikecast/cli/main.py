@@ -10,6 +10,8 @@ Five subcommands::
     strikecast evaluate experiment=count  stage=test          # metrics only
     strikecast report   experiment=count                      # §7 tables
     strikecast verify   --golden golden/                      # §6 comparisons
+    strikecast featsel  experiment=count   # feature selection ONCE (needs PYTHONHASHSEED=0)
+    strikecast importance experiment=count model=catboost_tweedie paradigm=activity seed=42
 
 Argument grammar
 ----------------
@@ -56,7 +58,9 @@ __all__ = ["main"]
 
 logger = logging.getLogger(__name__)
 
-COMMANDS: tuple[str, ...] = ("run", "tune", "evaluate", "report", "verify")
+COMMANDS: tuple[str, ...] = (
+    "run", "tune", "evaluate", "report", "verify", "featsel", "importance",
+)
 
 #: Selectors consumed by the CLI; never forwarded to Hydra.
 SELECTORS: tuple[str, ...] = ("model", "paradigm", "stage", "seed")
@@ -113,6 +117,42 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="log one line every N folds (0 = off)",
+    )
+    parser.add_argument(
+        "--allow-default-params",
+        action="store_true",
+        help="run: let a tunable model without best_params.json run on the spec "
+        "defaults (otherwise an error, audit C17); the --benchmark pilot uses it",
+    )
+    parser.add_argument(
+        "--max-folds",
+        type=int,
+        default=None,
+        help="run: only the first N folds of each stage (benchmark / legacy "
+        "verification); part of the stage identity",
+    )
+    parser.add_argument(
+        "--n-boot",
+        type=int,
+        default=1000,
+        help="report: bootstrap replicates for the pairwise CIs (§7.1 default: 1000)",
+    )
+    parser.add_argument(
+        "--no-comparisons",
+        action="store_true",
+        help="report: leaderboards only, no pairwise/CD/family tables",
+    )
+    parser.add_argument(
+        "--no-permutation",
+        action="store_true",
+        help="importance: GBDT gain only, skip the (expensive) permutation half",
+    )
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=-1,
+        help="importance: joblib workers for sklearn permutation_importance "
+        "(legacy -1; it never changes a value)",
     )
     parser.add_argument(
         "-v", "--verbose", action="count", default=0, help="-v for INFO, -vv for DEBUG"
@@ -214,6 +254,8 @@ def _cmd_run(cfg: ExperimentConfig, selectors: dict[str, list[str]], args) -> in
         store=store,
         force=args.force,
         progress_every=args.progress_every,
+        allow_default_params=args.allow_default_params,
+        max_folds=args.max_folds,
     )
     ran = [o for o in outcomes if not o.skipped]
     for outcome in outcomes:
@@ -279,6 +321,14 @@ def _cmd_evaluate(cfg: ExperimentConfig, selectors: dict[str, list[str]], args) 
 
 
 def _cmd_report(cfg: ExperimentConfig, selectors: dict[str, list[str]], args) -> int:
+    """``strikecast report``: every plan §7 table for one experiment.
+
+    The selectors keep their meaning: ``seed=`` is the evaluation-seed list of
+    §7.1 and its FIRST entry is also the single seed the leaderboard and the
+    pairwise comparison are built from (the leaderboard has no seed column, §7's
+    Q2), ``model=`` and ``paradigm=`` restrict which runs are compared, and
+    ``stage=`` restricts which stages are read.
+    """
     from strikecast.pipeline import report_stage  # noqa: PLC0415
 
     store = _store(cfg, args)
@@ -286,8 +336,13 @@ def _cmd_report(cfg: ExperimentConfig, selectors: dict[str, list[str]], args) ->
     written = report_stage.report(
         cfg,
         store=store,
+        seed=seeds[0] if seeds else 42,
         eval_seeds=seeds,
         stages=tuple(selectors.get("stage", ("cv", "test"))),
+        models=selectors.get("model") or None,
+        paradigms=selectors.get("paradigm") or None,
+        n_boot=args.n_boot,
+        comparisons=not args.no_comparisons,
     )
     for name, path in written.items():
         print(f"{name}: {path}")
@@ -329,6 +384,89 @@ def _cmd_verify(args) -> int:
     return 0
 
 
+def _cmd_featsel(cfg: ExperimentConfig, selectors: dict[str, list[str]], args) -> int:
+    """``strikecast featsel experiment=<name>``: the feature selection, ONCE.
+
+    Computes (or, when already cached, loads and provenance-checks) the
+    selection of every head -- one for count/diff, ``regressor`` +
+    ``classifier`` for the hurdle, one per key for damage -- and writes it to
+    ``<store>/<experiment>/shared/feature_selection.<hash>.json``. Later
+    cv/tune/test jobs with ``feature_selection.require_cached`` load it and
+    refuse to re-select (audit 2026-09-26 A12/D2). Needs ``PYTHONHASHSEED=0``.
+    ``--force`` recomputes. Pass the same overrides (``legacy=<name>``, ...)
+    and ``--store-root`` as the jobs that will read it.
+    """
+    from strikecast.pipeline import data_stage  # noqa: PLC0415
+
+    store = _store(cfg, args)
+    sets = data_stage.select_features(cfg, store, force=args.force)
+    for head, found in sets.items():
+        print(
+            f"{cfg.name}{'/' + head if head else ''}: {found.source}  "
+            f"past={len(found.past_keep)} future={len(found.future_keep)}  {found.path}"
+        )
+    return 0
+
+
+def _cmd_importance(cfg: ExperimentConfig, selectors: dict[str, list[str]], args) -> int:
+    """``strikecast importance``: feature importance of fitted models (audit C14).
+
+    GBDT gain + permutation per horizon (``_regression_GBDT.ipynb`` cells
+    57-58) or Chronos-2 permutation (``_chronos2.py:686``), written next to the
+    run (``<run>/importance/``) and collected per seed into
+    ``<store>/<experiment>/report/importance/seed=<s>/``. Without ``model=`` /
+    ``paradigm=`` it runs what the thesis computed
+    (``importance_stage.DEFAULT_JOBS``). ``seed=`` defaults to the TUNING seed:
+    the thesis computed importances once, not per evaluation seed. Chronos-2
+    needs ``envs/autogluon`` and a completed test stage of the same seed.
+    """
+    from strikecast.pipeline import data_stage, importance_stage  # noqa: PLC0415
+
+    store = _store(cfg, args)
+    seeds = [int(s) for s in selectors.get("seed", [])] or [int(cfg.seeds.tuning_seed)]
+    if "model" in selectors:
+        jobs = {
+            m: tuple(selectors.get("paradigm") or [str(p) for p in cfg.paradigm_names])
+            for m in selectors["model"]
+        }
+    else:
+        jobs = importance_stage.default_jobs(cfg.name)
+        if "paradigm" in selectors:
+            jobs = {
+                m: tuple(p for p in ps if p in selectors["paradigm"]) for m, ps in jobs.items()
+            }
+    if not jobs:
+        raise SystemExit(
+            f"no default importance jobs for experiment {cfg.name!r}; pass model=... paradigm=..."
+        )
+    data = data_stage.prepare_data(cfg, store)
+    n_run = 0
+    for seed in seeds:
+        for model, paradigms in jobs.items():
+            for paradigm in paradigms:
+                outcome = importance_stage.run_importance(
+                    cfg,
+                    model,
+                    paradigm,
+                    seed,
+                    data,
+                    store=store,
+                    force=args.force,
+                    permutation=not args.no_permutation,
+                    n_jobs=args.n_jobs,
+                )
+                n_run += not outcome.skipped
+                state = "skip" if outcome.skipped else f"done {outcome.seconds:.0f}s"
+                print(f"{state}  {outcome.label}  rows={outcome.n_rows}  {outcome.path}")
+        # Every COMPLETED importance run of the experiment, not just this
+        # invocation's: separate per-model jobs must not overwrite each other.
+        written = importance_stage.collect_importance(store, cfg, seed)
+        for name, path in written.items():
+            print(f"{name}: {path}")
+    print(f"{n_run} importance run(s) computed; store={store.root}")
+    return 0
+
+
 # --------------------------------------------------------------------------- #
 # entry point
 # --------------------------------------------------------------------------- #
@@ -338,7 +476,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         level={0: logging.WARNING, 1: logging.INFO}.get(args.verbose, logging.DEBUG),
         format="%(levelname)s %(name)s: %(message)s",
     )
+    return _run_interruptible(args)
 
+
+def _run_interruptible(args: argparse.Namespace) -> int:
+    """Dispatch under the SIGTERM/SIGUSR1 handlers of audit C21.
+
+    A signal (SLURM wall clock, requeue, ``scancel``) marks every stage this
+    process started ``interrupted`` instead of leaving it ``running``, and the
+    process exits with ``EXIT_INTERRUPTED`` (99). ``tune`` exits at once so the
+    running Optuna trial is not counted (see ``strikecast.pipeline.interrupt``).
+    """
+    from strikecast.pipeline import interrupt  # noqa: PLC0415
+
+    previous = interrupt.install(args.command)
+    try:
+        return _dispatch(args)
+    except interrupt.StageInterrupted as exc:
+        from strikecast.store.run_store import interrupt_active_stages  # noqa: PLC0415
+
+        marked = interrupt_active_stages(str(exc))
+        print(f"{exc}: {len(marked)} stage(s) marked interrupted", file=sys.stderr)
+        return interrupt.EXIT_INTERRUPTED
+    finally:
+        interrupt.restore(previous)
+
+
+def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "verify":
         return _cmd_verify(args)
 
@@ -353,6 +517,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_evaluate(cfg, selectors, args)
     if args.command == "report":
         return _cmd_report(cfg, selectors, args)
+    if args.command == "featsel":
+        return _cmd_featsel(cfg, selectors, args)
+    if args.command == "importance":
+        return _cmd_importance(cfg, selectors, args)
     raise SystemExit(f"unknown command {args.command!r}")  # pragma: no cover
 
 

@@ -11,6 +11,9 @@ defaults:
   - /tracking: wandb_online
   - /seeds: default
   - _self_
+  # Thesis-faithful feature mode (legacy expdecay7; count/diff also load the thesis' cached selection):
+  # `legacy=diff` loads configs/legacy/diff.yaml AFTER this file.
+  - /legacy: null
 
 name: diff
 
@@ -29,6 +32,12 @@ series:
     train: 0.70
     val: 0.10
     test: 0.20
+  # Audit 2026-09-26 A1/D1: the sixth window transform is the literal leaky
+  # integrator s_t = x_t + 2^(-1/7) s_{t-1} (`leaky7`), as the thesis text
+  # describes.  The thesis itself ran the buggy `expdecay7` (alpha weighting
+  # TODAY); reproduce it with `legacy=<experiment>` (configs/legacy/).
+  window:
+    expdecay: leaky
 
 # Plan sec. 2.3 "Target transform": first difference, anchor on the last actual
 # (`_diff_to_level`, _diff_regression.py).
@@ -50,35 +59,48 @@ common_kwargs:
 # Its own selection: LightGBM with objective "regression" on CPU with 4 threads,
 # fitted on the LEVEL target while the models train on differences (plan
 # sec. 2.3 "Feature selection"; F29, Q8).
+# The thesis ran it with 4 threads (`available_threads = 4`, hard-coded,
+# _diff_regression.py:90) and cached it (`features/diffreg_saved_sets.pkl`,
+# converted to golden/converted/feature_sets/diffreg.json); configs/legacy/diff.yaml
+# restores both.  Publication runs (audit 2026-09-26 A12/A13, D2): fresh
+# selection on the leaky7 features, once, deterministic CPU LightGBM,
+# PYTHONHASHSEED=0, via `strikecast featsel experiment=diff`.
 feature_selection:
   selector: diffreg
   device: cpu          # device_type="cpu"
-  num_threads: 4       # available_threads = 4, hard-coded (_diff_regression.py:90)
+  num_threads: 8
   top_k: 100
   cache: true
-  cache_path: features/diffreg_saved_sets.pkl   # _diff_regression.py:487
+  cache_path: null
+  deterministic: true
+  require_cached: true
 
 # GBM_VARIANTS (_diff_regression.py:120), NN_VARIANTS (:1201), LINEAR_VARIANTS
 # (:121) and REGRESSORS_TO_RUN (:123-128).  Unlike the count family these
 # baselines really did run and are persisted (F84).
+# `paradigms:` is the thesis-faithful job matrix (audit 2026-09-26 C16/D8; job-
+# matrix metadata only): every tuned model ran Global/Activity/Local, the RNNs
+# too (golden/results/diff has `local,gru_w7_tuned`); the four baselines ran
+# Global only (golden/results/diff: (9 x 3 + 4) x 2 = 62 rows).
 models:
-  - lightgbm
-  - xgboost
-  - catboost
-  - lstm_w7
-  - lstm_w14
-  - lstm_w28
-  - gru_w7
-  - gru_w14
-  - gru_w28
-  - linear             # LinearRegressionModel, untuned floor (_diff_regression.py:360-365)
+  - {name: lightgbm, paradigms: [global, activity, local]}
+  - {name: xgboost,  paradigms: [global, activity, local]}
+  - {name: catboost, paradigms: [global, activity, local]}
+  - {name: lstm_w7,  paradigms: [global, activity, local]}
+  - {name: lstm_w14, paradigms: [global, activity, local]}
+  - {name: lstm_w28, paradigms: [global, activity, local]}
+  - {name: gru_w7,   paradigms: [global, activity, local]}
+  - {name: gru_w14,  paradigms: [global, activity, local]}
+  - {name: gru_w28,  paradigms: [global, activity, local]}
+  - {name: linear, paradigms: [global]}   # LinearRegressionModel, untuned floor (_diff_regression.py:360-365)
   # ARIMA(p=7, d=0, q=1) on the DIFFERENCES == ARIMA(7,1,1) on levels; one model
   # per region, rebuilt inside every prediction step, with a NaiveMean fallback
   # on any exception (F5; tests/legacy_ref/diff_runners.py:138, 221, 309).
   - name: arima
     fallback: naive_mean
-  - naive_last         # NAIVE_MODELS (_diff_regression.py:117)
-  - naive_weekly
+    paradigms: [global]
+  - {name: naive_last, paradigms: [global]}     # NAIVE_MODELS (_diff_regression.py:117)
+  - {name: naive_weekly, paradigms: [global]}
 
 # Plan sec. 1 "Device policy": diff-branch XGBoost and CatBoost on GPU,
 # LightGBM on CPU.  Legacy spellings, one per library.

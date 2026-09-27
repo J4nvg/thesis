@@ -1,0 +1,77 @@
+# Plan §8 P8: "CI with unit and equivalence tests on a synthetic panel".
+#
+# What runs here is everything that needs NO real inputs, NO `golden/` material
+# and NO network:
+#
+#   * `tests/unit`            -- synthetic frames and fakes throughout
+#   * `tests/equivalence`     -- level D: the engine against every legacy runner
+#                                on the 4-region / 121-step synthetic panel
+#                                built in `tests/equivalence/conftest.py`
+#
+# `tests/golden` (levels A, B, E-I) is deliberately NOT run: those compare
+# against `golden/`, which is git-ignored and lives only on Jan's machines.
+# Their oracle is the thesis' own stored output, so there is nothing for a
+# runner to compare against. Run them locally, see README.md.
+name: CI
+
+on:
+  push:
+    branches: [main, refactor]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # F16: the legacy covariate column order depends on the hash seed, and
+  # CPython reads this before any user code runs.
+  PYTHONHASHSEED: "0"
+  # Nothing here may reach the network. A test that forgets its wandb fake
+  # fails loudly instead of trying to log in.
+  WANDB_MODE: disabled
+  WANDB_SILENT: "true"
+  MPLBACKEND: Agg
+  TOKENIZERS_PARALLELISM: "false"
+  UV_FROZEN: "1"
+
+jobs:
+  lint:
+    # Seconds, and it does not need the project environment, so a broken
+    # dependency never hides a lint error.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # Pinned: an unpinned ruff turns a new release into a red build on a
+      # commit that changed nothing. Bump together with the `dev` extra.
+      - name: ruff
+        run: uvx ruff@0.16.8 check .
+
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # `.python-version` pins 3.13; `requires-python` is >=3.13,<3.14.
+      - name: install the pinned environment
+        # --frozen: fail rather than silently re-resolve, exactly as the SLURM
+        # templates do (scripts/slurm/*.sbatch). The `dev` extra brings pytest.
+        run: uv sync --frozen --extra dev
+
+      - name: the console script exists
+        run: uv run strikecast --help
+
+      - name: unit tests
+        run: uv run pytest tests/unit -q -p no:cacheprovider -m "not slow"
+
+      - name: equivalence tests (level D, synthetic panel)
+        run: uv run pytest tests/equivalence -q -p no:cacheprovider -m "not slow"

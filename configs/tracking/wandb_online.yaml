@@ -7,3 +7,14 @@ tracking:
   project: strikecast
   entity: null
   group: null
+  # Added by Stream I so `tracking.dir=...` / `tracking.strict=true` work as
+  # plain Hydra overrides (a key absent from the group cannot be overridden
+  # without `+`), which is what the SLURM templates use. The values are the
+  # schema defaults, so composition is unchanged.
+  dir: null        # where the backend writes its run directories (offline: scratch)
+  strict: false    # Decision D11 (audit 2026-09-26): cluster jobs run ONLINE with
+                   # strict: false -- the run store is the truth, and a W&B outage or a
+                   # missing API key must not fail a 30-hour job (it logs a warning and
+                   # disables the mirror). Supersedes Jan's 2026-09-18 `strict: true`.
+                   # `tracking.strict=true` on the command line restores fail-fast.
+  tags: []         # extra tags, appended to [family, kind] from the model spec

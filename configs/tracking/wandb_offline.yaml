@@ -7,3 +7,10 @@ tracking:
   project: strikecast
   entity: null
   group: null
+  # Added by Stream I so `tracking.dir=...` / `tracking.strict=true` work as
+  # plain Hydra overrides (a key absent from the group cannot be overridden
+  # without `+`), which is what the SLURM templates use. The values are the
+  # schema defaults, so composition is unchanged.
+  dir: null        # where the backend writes its run directories (offline: scratch)
+  strict: false    # true = a tracking error fails the run (P4 smoke test only)
+  tags: []         # extra tags, appended to [family, kind] from the model spec

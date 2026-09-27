@@ -15,10 +15,10 @@ from typing import Any
 import optuna
 import pytest
 from pytorch_lightning.callbacks import EarlyStopping
+from tests.legacy_ref.rnn_builders import COUNT, DIFF
 
 from strikecast.models import rnn
 from strikecast.models.spec import RunContext, get_spec, registered_names
-from tests.legacy_ref.rnn_builders import COUNT, DIFF
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_TUNING = REPO_ROOT / "golden" / "converted" / "tuning"

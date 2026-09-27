@@ -53,6 +53,21 @@ default branch omits ``boost_from_average`` while its tuned builder passes
 ``boost_from_average=False`` (flag F83, see below); ``build`` always follows
 the tuned builder.
 
+XGBoost: one booster per horizon (audit 2026-09-26 B3/B4, decision D5)
+----------------------------------------------------------------------
+darts 0.43 wraps a model in its per-horizon ``MultiOutputRegressor`` only when
+the estimator does NOT report native multi-output support
+(``sklearn_model.py``: ``_supports_native_multioutput``). With xgboost 3.1.3 +
+scikit-learn 1.6 ``XGBRegressor`` reports it, so darts hands it a 7-column
+target: ``count:poisson`` / ``reg:tweedie`` then fail ("multioutput is not
+supported by the current objective function", B3) and the diff family's
+``reg:squarederror`` silently trains ONE multi-output booster (B4). The thesis
+text (a separate model ``f_h`` per horizon) and the Colab environment that
+produced the count XGBoost numbers wrapped per horizon, so every XGBoost variant
+is built as :class:`PerHorizonXGBModel`, which reports no native multi-output
+support and therefore always gets darts' per-horizon wrapper, exactly like
+LightGBM and CatBoost here.
+
 Flags raised by this module (see ``docs/REFACTOR_PLAN.md`` sec. 4)
 -----------------------------------------------------------------
 F83, F84, F85 -- recorded in the phase report, not acted upon here.
@@ -136,6 +151,44 @@ def _build_lightgbm(
     )
 
 
+def _per_horizon_xgb_class() -> type:
+    """:class:`PerHorizonXGBModel`, created lazily so importing this module
+    does not import darts/xgboost."""
+    global _PER_HORIZON_XGB
+    if _PER_HORIZON_XGB is None:
+        from darts.models import XGBModel
+
+        class PerHorizonXGBModel(XGBModel):
+            """darts ``XGBModel`` that always trains one booster per horizon (B3/B4, D5).
+
+            Reporting no native multi-output support makes darts wrap the
+            ``XGBRegressor`` in its ``MultiOutputRegressor`` whenever
+            ``output_chunk_length > 1`` and ``multi_models`` -- the direct
+            strategy the thesis describes, and the only one ``count:poisson``
+            and ``reg:tweedie`` can fit.
+            """
+
+            @property
+            def _supports_native_multioutput(self) -> bool:
+                return False
+
+        PerHorizonXGBModel.__module__ = __name__
+        PerHorizonXGBModel.__qualname__ = "PerHorizonXGBModel"
+        _PER_HORIZON_XGB = PerHorizonXGBModel
+    return _PER_HORIZON_XGB
+
+
+_PER_HORIZON_XGB: type | None = None
+
+
+def __getattr__(name: str) -> Any:
+    # `from strikecast.models.gbm import PerHorizonXGBModel` (and unpickling)
+    # resolve the lazily created class through the module.
+    if name == "PerHorizonXGBModel":
+        return _per_horizon_xgb_class()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def _build_xgboost(
     params: Mapping[str, Any],
     ctx: RunContext,
@@ -145,8 +198,12 @@ def _build_xgboost(
     multi_models: bool,
     pass_threads: bool,
 ) -> Any:
-    """``build_gbm_from_params`` XGBoost branch (count 537-552 / diff 430-442)."""
-    from darts.models import XGBModel
+    """``build_gbm_from_params`` XGBoost branch (count 537-552 / diff 430-442).
+
+    Built as :class:`PerHorizonXGBModel` (one booster per horizon, B3/B4, D5);
+    every constructor kwarg is the legacy builder's.
+    """
+    XGBModel = _per_horizon_xgb_class()  # noqa: N806
 
     p = dict(params)
     extra: dict[str, Any] = {"objective": objective}

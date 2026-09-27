@@ -80,6 +80,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from strikecast.backtest.predictions import PredictionSet
 
 __all__ = [
+    "LEADERBOARD_COLUMNS",
     "METRIC_SETS",
     "VIEWS",
     "MetricSet",
@@ -88,6 +89,12 @@ __all__ = [
 ]
 
 MetricSet = Literal["count", "hurdle", "classification"]
+
+#: The three key columns every ``leaderboard.csv`` starts with, before the
+#: metric block. Mirrors
+#: :data:`strikecast.evaluation.leaderboard.LEADERBOARD_KEYS`, which cannot be
+#: imported here (that module imports this one).
+LEADERBOARD_COLUMNS: tuple[str, ...] = ("split", "paradigm", "model")
 
 #: The three legacy metric sets, in the order they appear in the plan.
 METRIC_SETS: tuple[str, ...] = ("count", "hurdle", "classification")
@@ -333,5 +340,17 @@ def leaderboard(rows: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
       becomes NaN in the frame.
     * The CV leaderboards built earlier in the same scripts sort by
       ``"MASE_mean"`` alone and are not persisted; only this one reaches disk.
+
+    One addition, for the report stage rather than for the legacy scripts: an
+    EMPTY ``rows`` returns the empty frame with the three key columns instead
+    of raising ``KeyError: 'split'``. ``pd.DataFrame([])`` has no columns, so
+    the legacy expression cannot sort it; the legacy scripts never hit that
+    because they always had at least one model, while ``strikecast report`` is
+    routinely pointed at a store that holds nothing for the requested seed yet
+    (plan sec. 7, "every output must degrade gracefully"). Non-empty input is
+    untouched, so nothing the thesis produced changes.
     """
-    return pd.DataFrame(list(rows)).sort_values(["split", "MASE_mean"]).reset_index(drop=True)
+    rows = list(rows)
+    if not rows:
+        return pd.DataFrame(columns=list(LEADERBOARD_COLUMNS))
+    return pd.DataFrame(rows).sort_values(["split", "MASE_mean"]).reset_index(drop=True)

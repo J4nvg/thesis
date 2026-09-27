@@ -105,9 +105,17 @@ SYNTHETIC_TWEEDIE_POWER = 1.37
 
 
 def fingerprint(model: Any) -> tuple[Any, ...]:
-    """Class, constructor kwargs and forwarded estimator kwargs of a darts model."""
+    """Class, constructor kwargs and forwarded estimator kwargs of a darts model.
+
+    ``PerHorizonXGBModel`` counts as darts' ``XGBModel``: it differs ONLY in
+    forcing the per-horizon wrapper (audit B3/B4, D5; pinned separately by
+    :func:`test_count_xgboost_fits_one_booster_per_horizon`).
+    """
+    cls = type(model)
+    if cls.__name__ == "PerHorizonXGBModel":
+        cls = cls.__mro__[1]
     return (
-        type(model),
+        cls,
         dict(model.model_params),
         getattr(model, "kwargs", None),
     )
@@ -477,3 +485,77 @@ def test_tweedie_power_only_in_the_tweedie_search_spaces(variant: str):
         )
     )
     assert ("tweedie_variance_power" in drawn) is variant.endswith("_tweedie")
+
+
+# --------------------------------------------------------------------------- #
+# XGBoost: one booster per horizon (audit 2026-09-26 B3/B4, decision D5)        #
+# --------------------------------------------------------------------------- #
+def _synthetic_lists(n_regions: int = 3, n_days: int = 120, n_train: int = 100):
+    import numpy as np  # noqa: PLC0415
+    import pandas as pd  # noqa: PLC0415
+    from darts import TimeSeries  # noqa: PLC0415
+
+    rng = np.random.default_rng(0)
+    index = pd.date_range("2022-01-01", periods=n_days, freq="D")
+    target = [
+        TimeSeries.from_times_and_values(
+            index[:n_train], rng.poisson(1.0 + r, n_train).astype(float), columns=["y"]
+        )
+        for r in range(n_regions)
+    ]
+    past = [
+        TimeSeries.from_times_and_values(index, rng.normal(size=(n_days, 2)), columns=["a", "b"])
+        for _ in range(n_regions)
+    ]
+    future = [
+        TimeSeries.from_times_and_values(index, rng.normal(size=(n_days, 1)), columns=["f"])
+        for _ in range(n_regions)
+    ]
+    return target, past, future
+
+
+@pytest.mark.parametrize(
+    ("variant", "experiment"),
+    [("xgboost_poisson", "count"), ("xgboost_tweedie", "count"), ("xgboost", "diff")],
+)
+def test_count_xgboost_fits_one_booster_per_horizon(variant: str, experiment: str):
+    """B3: count XGBoost could not be fitted at all in the pinned environment
+    ("multioutput is not supported by the current objective function"); B4: the
+    diff XGBoost silently trained ONE multi-output booster. Both now get darts'
+    per-horizon wrapper: 7 boosters for output_chunk_length=7."""
+    pytest.importorskip("xgboost")
+    import numpy as np  # noqa: PLC0415
+
+    target, past, future = _synthetic_lists()
+    spec = get_spec(variant, experiment)
+    params = dict(spec.defaults, n_estimators=25)
+    model = spec.build(params, RunContext(seed=SEED, device="cpu", threads=2))
+    assert type(model).__name__ == "PerHorizonXGBModel"
+    assert model._supports_native_multioutput is False
+
+    model.fit(target, past_covariates=past, future_covariates=future)
+    estimators = getattr(model.model, "estimators_", None)
+    assert estimators is not None and len(estimators) == 7
+    assert {type(e).__name__ for e in estimators} == {"XGBRegressor"}
+    pred = model.predict(7, series=target[0], past_covariates=past[0], future_covariates=future[0])
+    values = pred.values().ravel()
+    assert values.shape == (7,) and np.isfinite(values).all()
+    if experiment == "count":
+        assert (values >= 0).all()  # log-link objectives predict on the count scale
+    # a retrain rebuilds the same class (darts' untrained_model) and it pickles
+    import pickle  # noqa: PLC0415
+
+    assert type(model.untrained_model()).__name__ == "PerHorizonXGBModel"
+    assert type(pickle.loads(pickle.dumps(model))).__name__ == "PerHorizonXGBModel"
+
+
+def test_count_xgboost_with_the_cell56_params_builds():
+    """The imported thesis params (B1) build the per-horizon model."""
+    store_tuning = GOLDEN.parent / "runs" / "count" / "tuning"  # scripts/import_golden_params.py
+    for variant in ("xgboost_poisson", "xgboost_tweedie"):
+        best = stored_best_params(store_tuning, variant)
+        if best is None:
+            pytest.skip(f"no imported best_params.json for {variant}")
+        spec = get_spec(variant)
+        model = spec.build(spec.from_best_params(best), RunContext(SEED, "cpu", 2))
+        assert type(model).__name__ == "PerHorizonXGBModel"

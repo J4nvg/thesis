@@ -29,6 +29,7 @@ if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import shim for `tests.
     sys.path.insert(0, str(REPO_ROOT))
 
 from sklearn.isotonic import IsotonicRegression  # noqa: E402
+from tests.legacy_ref import hurdle_builders as legacy  # noqa: E402
 
 from strikecast.evaluation import (  # noqa: E402
     apply_calibrators_per_horizon,
@@ -42,7 +43,6 @@ from strikecast.evaluation import (  # noqa: E402
     venn_abers_data_from_json,
     venn_abers_data_to_json,
 )
-from tests.legacy_ref import hurdle_builders as legacy  # noqa: E402
 
 GOLDEN_DIR = REPO_ROOT / "golden" / "results" / "finalhurdle"
 

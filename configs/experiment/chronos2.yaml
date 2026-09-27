@@ -1,0 +1,183 @@
+# @package _global_
+# Chronos-2 family: AutoGluon's time-series foundation model, zero-shot and
+# fine-tuned, as a FIXED predictor on the shared expanding-window schedule.
+# Legacy source: `_chronos2.py` (there is no notebook for this family).
+# Plan sec. 2.1 row "chronos2", sec. 2.3 column "chronos2", sec. 8 P5.
+#
+# ENVIRONMENT.  This is the one experiment the main `.venv` cannot run:
+# AutoGluon 1.5.0 caps pandas<2.4 / numpy<2.4 / scipy<1.17, which is
+# unsatisfiable with the frozen core (plan sec. 5.7).  Run it from the repo root
+# with the separate environment under `envs/autogluon/`:
+#
+#     uv sync  --project envs/autogluon          # once
+#     uv run   --project envs/autogluon python -m strikecast.cli.main run \
+#              experiment=chronos2 stage=test seed=42
+#
+# See `envs/autogluon/README.md` for the pinned versions and the cluster notes.
+# Everything else in `strikecast` imports without AutoGluon; only
+# `strikecast.data.autogluon` and `strikecast.models.chronos` need this env, and
+# both keep their AutoGluon imports inside functions.
+defaults:
+  # NO `/backtest: weekly_retrain`.  Chronos-2 is fit ONCE and never refit
+  # (`retrain_stride: null`, plan sec. 5.2) and has no CV stage at all (F131),
+  # so its schedule is written out in full below instead of being inherited.
+  - /paradigm: global
+  - /tracking: wandb_online
+  - /seeds: default
+  - _self_
+  # Thesis-faithful feature mode (legacy expdecay7; count/diff also load the thesis' cached selection):
+  # `legacy=chronos2` loads configs/legacy/chronos2.yaml AFTER this file.
+  - /legacy: null
+
+name: chronos2
+
+data:
+  # TARGET = "act_drone_strike_on_ua"                  (_chronos2.py:100)
+  target: act_drone_strike_on_ua
+  # DATA_FOLDER = "./data"; FIXED_DATA_PATH / DATASET_PATH (_chronos2.py:96-98)
+  fixed_dir: data/fixed
+  dataset_dir: data/dataset
+  # `for_global = for_global[for_global["Activity_Level"] != 0]` (_chronos2.py:168)
+  activity_min_level: 1
+  # remove_low_prevalence(df=for_global, ratio=0.1, specific="acled_other_")
+  # (_chronos2.py:171)
+  low_prevalence_ratio: 0.1
+  binarize: []
+  # The Chronos panel variant: NO ratio/interaction features and the
+  # (region, event_date) MultiIndex is kept, so the stray `index` column of F22
+  # survives into the AutoGluon frame as an 84th past covariate (F123).
+  # `build_panel_legacy_chronos` (data/panel.py) is the exact port of
+  # _chronos2.py:125-190.
+  panel_variant: chronos
+
+series:
+  split:
+    # TRAIN_FRAC, VAL_FRAC, TEST_FRAC = 0.70, 0.10, 0.20   (_chronos2.py:112)
+    train: 0.70
+    val: 0.10
+    test: 0.20
+
+# Plan sec. 2.3 "Target transform": identity.  Chronos-2 forecasts the level
+# counts directly; the clip at 0 lives in the metric primitives, not here
+# (_chronos2.py:307-320).
+transform:
+  kind: identity
+
+# `common_kwargs` is inert for this family: AutoGluon takes no darts lag
+# specification.  Plan sec. 2.3 row "lags_past_covariates" says "known
+# covariates only" for chronos2 -- the 27 future covariates are declared as
+# `known_covariates_names` (_chronos2.py:516) and every other column of the
+# frame is a past covariate that Chronos-2 reads from its own context window.
+# The block is left at its defaults so the schema validates; nothing reads it.
+common_kwargs:
+  lags: 7
+  output_chunk_length: 7                 # OUTPUT_CHUNK_LEN = 7 (_chronos2.py:101)
+
+# NO FEATURE SELECTION.  `_chronos2.py` never runs `get_top_100_from_lgbm`; it
+# hands AutoGluon all 111 covariate columns (27 known + 84 past, F123).  That is
+# flag F28 ("Chronos-2 does receive all future covariates ... plus all raw past
+# covariates").  The schema has no `enabled` switch, so the block below is
+# INERT and `pipeline/data_stage.py` must skip `build_or_load_features` when
+# `data.panel_variant == "chronos"` -- see the Stream H entry in
+# docs/REFACTOR_PROGRESS.md.  `cache_path: null` + `cache: false` is chosen so
+# that, if it were ever run, it would at least not silently load the count
+# family's cached set.
+feature_selection:
+  selector: countreg
+  cache: false
+  cache_path: null
+  top_k: 100
+
+# `_chronos2.py` evaluates the two Chronos variants and two naive floors
+# (`naive_rolling_long`, a fourth implementation of the same baselines, F41).
+# The naive floors are NOT listed here: `naive_last` / `naive_weekly` are
+# registered for the `diff` experiment only, and their chronos2 frames are
+# identical to the diff ones once sorted (F41, golden level E), so the
+# leaderboard quotes the diff run's.  Adding `"chronos2"` to their
+# `experiments=` tuple in `models/classical.py` is the one-word follow-up that
+# would let this list carry all four rows of
+# golden/results/chronos2/leaderboard.csv.
+# `paradigms: [global]`: ONE predictor for all regions (see `paradigms:` below,
+# F133); the thesis labels it "Local" (audit 2026-09-26 C16/D8).
+models:
+  - {name: chronos2_zero_shot, paradigms: [global]}    # _chronos2.py:508-527
+  - {name: chronos2_fine_tuned, paradigms: [global]}   # _chronos2.py:648-670
+
+# One predictor for all 20 regions at once.  Plan sec. 2.1 labels this family's
+# paradigm "local (regions as multivariate)"; in the partition sense of
+# `backtest/grouping.py` it is GLOBAL -- there is exactly one
+# `TimeSeriesPredictor` and it sees every item in one call.  See F133.
+paradigms:
+  - name: global
+
+# `torch.cuda.is_available()` decides (_chronos2.py:59-61); the script passes no
+# device anywhere and AutoGluon picks. `auto` is that behaviour, spelled.
+device:
+  chronos2: auto
+
+# The script never calls `get_available_threads()`; AutoGluon and torch use
+# their own defaults.
+threads: null
+
+stages:
+  # NO `cv` stage: `_chronos2.py` evaluates only the held-out 20% test segment
+  # (F131).  Its "validation" is AutoGluon's internal 3-window backtest, which
+  # happens inside `fit` and is not a stage of this schedule (F129).
+  test:
+    # test_start_ix = int((TRAIN_FRAC + VAL_FRAC) * n_full)  (_chronos2.py:702)
+    # -- the same expression every darts family uses, which is why the fold
+    # schedules are date-identical across families (F34 refining F3).  On the
+    # real panel: n = 847, t0 = 677, first origin 2024-08-05, 164 folds.
+    start: train_val_end
+    horizon: 7          # OUTPUT_CHUNK_LEN = 7   (_chronos2.py:101)
+    predict_stride: 1   # CV_STRIDE = 1          (_chronos2.py:102)
+    # THE difference from every other family: the predictor is fit once, before
+    # the loop, and `chronos2_rolling_long` never refits.  `null` is the
+    # engine's "never retrain" (plan sec. 5.2), and `Chronos2Forecaster` also
+    # declares `retrains = False`, so `fit` cannot be reached from the engine.
+    retrain_stride: null
+    # The adapter presets (for_cv / for_test / for_tuning, F81) are darts
+    # post-processing and do not apply: the Chronos adapter has no sampling and
+    # no log link, it reads the median quantile column (_chronos2.py:399-405).
+    # `for_test` is the preset that does nothing, so it is the honest spelling.
+    adapters:
+      global: for_test
+    # MAE_SCALES / RMSE_SCALES from `train_only_data`, the first
+    # `int(TRAIN_FRAC * n) = 592` steps -- TRAIN ONLY, never val or test
+    # (_chronos2.py:295-300), same as every family except the hurdle (F67).
+    naive_scales:
+      fit_on: train
+      seasonality: 7    # NAIVE_SEASONALITY = 7  (_chronos2.py:104)
+
+tuning:
+  # NOT `RMSSE_mean`.  The Chronos objective is AutoGluon's own internal
+  # validation MASE, `-leaderboard().iloc[0]["score_val"]` averaged over the
+  # three windows AutoGluon chose (_chronos2.py:607-609).  It is not comparable
+  # with the other families' shared-CV `RMSSE_mean` (F129), which is why it is
+  # named differently rather than reusing the string.
+  objective: internal_MASE
+  # OPTUNA_N_TRIALS = 12   (_chronos2.py:119) -- against 50 everywhere else.
+  n_trials:
+    chronos: 12
+  sampler: tpe         # TPESampler(seed=RANDOM_STATE)  (_chronos2.py:628)
+  # `optuna.create_study` is called with NO pruner (_chronos2.py:626-629), so
+  # Optuna's default MedianPruner is installed -- but `chronos2_objective`
+  # never calls `trial.report`, so no trial can ever be pruned.  `none` is the
+  # behaviour; `median` would be the object.  Part of F129.
+  pruner:
+    kind: none
+  direction: minimize  # `direction="minimize"` (_chronos2.py:627)
+  timeout_s: null      # OPTUNA_TIMEOUT_S = None (_chronos2.py:120)
+  load_if_exists: true # F11
+
+seeds:
+  # RANDOM_STATE = 42 (_chronos2.py:122) seeds numpy, torch and AutoGluon's
+  # `random_seed=`.  `chronos2_zero_shot` is `stochastic=False` (nothing is
+  # trained, F127) and is broadcast across seeds by `evaluation/seeds.py`;
+  # only `chronos2_fine_tuned` is actually swept, and one sweep member costs a
+  # full fine-tune, so keep the list short until the cluster runs it.
+  tuning_seed: 42
+
+# No calibration in this family.
+calibration:
+  enabled: false

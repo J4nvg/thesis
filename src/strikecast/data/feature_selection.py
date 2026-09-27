@@ -277,8 +277,13 @@ class FeatureSelection:
             return sorted(base)
         return sorted(base & set(available))
 
-    def to_json(self, path: str | Path) -> Path:
-        """Write the selection (not the gain table) as JSON."""
+    def to_json(self, path: str | Path, *, provenance: dict[str, Any] | None = None) -> Path:
+        """Write the selection (not the gain table) as JSON.
+
+        ``provenance`` (audit A13) records the window/selector configuration the
+        selection was made under; ``strikecast.pipeline.data_stage`` refuses to
+        reuse a selection whose provenance does not match the run.
+        """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -297,7 +302,12 @@ class FeatureSelection:
             "past_keep": self.past_keep,
             "future_keep": self.future_keep,
         }
-        path.write_text(json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8")
+        if provenance is not None:
+            payload["provenance"] = provenance
+        # atomic: a concurrent reader never sees half a selection
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8")
+        tmp.replace(path)
         return path
 
     @classmethod

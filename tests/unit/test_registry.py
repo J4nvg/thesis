@@ -91,8 +91,20 @@ SHARED_NAMES = ("lstm_w7", "lstm_w14", "lstm_w28")
 # --------------------------------------------------------------------------- #
 # completeness                                                                 #
 # --------------------------------------------------------------------------- #
+#: `chronos2` (Stream H, `models/chronos.py`) registers its two specs on import,
+#: but `models/registry.py` does NOT import that module yet -- the one-line
+#: `from . import chronos` is the pending hook (plan sec. 8 P5). So the family
+#: appears in the process-global registry only when another test module has
+#: imported it, which makes an `==` assertion order-dependent. Drop this set
+#: and restore the `==` once the hook lands.
+PENDING_EXPERIMENTS = {"chronos2"}
+
+
 def test_the_registry_holds_exactly_the_in_scope_experiments():
-    assert registered_experiments() == ["count", "damage", "diff", "hurdle"]
+    got = set(registered_experiments())
+    core = {"count", "damage", "diff", "hurdle"}
+    assert core <= got
+    assert got <= core | PENDING_EXPERIMENTS
 
 
 @pytest.mark.parametrize("experiment", sorted(EXPECTED))

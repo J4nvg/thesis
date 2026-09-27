@@ -25,6 +25,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import shim for `tests.`
     sys.path.insert(0, str(REPO_ROOT))
 
+from tests.legacy_ref import hurdle_builders as legacy  # noqa: E402
+
 from strikecast.data.feature_selection import legacy_common_kwargs  # noqa: E402
 from strikecast.models.classifiers import (  # noqa: E402
     DamageBuilders,
@@ -34,7 +36,6 @@ from strikecast.models.classifiers import (  # noqa: E402
     build_event_classifier,
 )
 from strikecast.models.spec import RunContext, get_spec, registered_names  # noqa: E402
-from tests.legacy_ref import hurdle_builders as legacy  # noqa: E402
 
 #: ``available_threads = get_available_threads()`` is machine dependent (F110),
 #: so every comparison pins one value on both sides instead of reading the

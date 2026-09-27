@@ -383,3 +383,137 @@ def test_write_artifact_json_and_parquet_only(store, run):
         store.write_artifact(run, "study.pkl", {"a": 1})
     with pytest.raises(TypeError, match="must be a DataFrame"):
         store.write_artifact(run, "x.parquet", {"a": 1})
+
+
+# --------------------------------------------------------------------------- #
+# attempts, interruption and the state lock (audit 2026-09-26 C21, C23)
+# --------------------------------------------------------------------------- #
+def test_each_start_opens_an_attempt_and_started_is_the_current_one(store, run, monkeypatch):
+    from strikecast.store import run_store as rs
+
+    stamps = iter(["2026-09-26T10:00:00Z", "2026-09-26T10:30:00Z",
+                   "2026-09-26T12:00:00Z", "2026-09-26T12:10:00Z"])
+    monkeypatch.setattr(rs, "_now", lambda: next(stamps))
+    monkeypatch.setenv("SLURM_JOB_ID", "4242")
+    store.start_stage(run, "cv", "h", params_source="tuned")
+    store.interrupt_stage(run, "cv", "interrupted by SIGTERM")
+    state = store.start_stage(run, "cv", "h")
+    assert state.started == "2026-09-26T12:00:00Z"  # not the first attempt's start (C21)
+    store.complete_stage(run, "cv")
+    state = store.read_state(run, "cv")
+    assert [a["outcome"] for a in state.attempts] == ["interrupted", "complete"]
+    assert state.attempts[0]["seconds"] == 1800.0
+    assert state.attempts[1]["seconds"] == 600.0
+    assert state.attempts[0]["slurm_job_id"] == "4242"
+    assert state.params_source == "tuned"
+
+
+def test_an_attempt_left_open_is_closed_as_lost(store, run):
+    store.start_stage(run, "cv", "h")  # the process then dies without a word
+    store.start_stage(run, "cv", "h")
+    attempts = store.read_state(run, "cv").attempts
+    assert attempts[0]["outcome"] == "lost" and "outcome" not in attempts[1]
+
+
+def test_interrupt_active_stages_marks_what_this_process_started(store, run, monkeypatch):
+    from strikecast.store import run_store as rs
+    from strikecast.store.run_store import interrupt_active_stages
+
+    monkeypatch.setattr(rs, "_ACTIVE", {})  # other tests' stages are not ours
+
+    store.start_stage(run, "cv", "h")
+    store.start_stage(run, "test", "h")
+    store.complete_stage(run, "test")
+    marked = interrupt_active_stages("interrupted by SIGUSR1")
+    assert [stage for _, stage in marked] == ["cv"]
+    state = store.read_state(run, "cv")
+    assert state.status == "interrupted" and state.error == "interrupted by SIGUSR1"
+    assert store.read_state(run, "test").status == "complete"
+    assert interrupt_active_stages() == []  # nothing left
+
+
+def test_max_folds_is_recorded(store, run):
+    store.start_stage(run, "test", "h", max_folds=14)
+    assert store.read_state(run, "test").max_folds == 14
+    store.start_stage(run, "test", "h")
+    assert store.read_state(run, "test").max_folds is None
+
+
+def test_run_lock_is_reentrant_and_released(store, run):
+    lock = store.lock(run)
+    with lock:
+        assert lock.path.is_dir()
+        with store.lock(run):  # the same process may take it again
+            store.write_state(run, StageState(stage="cv"))
+        assert lock.path.is_dir()
+    assert not lock.path.exists()
+
+
+def test_a_stale_lock_is_broken(store, run, monkeypatch):
+    import os
+
+    from strikecast.store.run_store import RunLock
+
+    lock = RunLock(store.resolve(run), timeout=5)
+    lock.path.mkdir(parents=True)
+    (lock.path / "owner").write_text("some-other-host 1")
+    old = lock.path.stat().st_mtime - 3600
+    os.utime(lock.path, (old, old))
+    with lock:  # older than LOCK_STALE_AFTER_S: taken over, not waited for
+        pass
+    # a dead pid on THIS host is stale at once
+    import socket
+
+    lock.path.mkdir()
+    (lock.path / "owner").write_text(f"{socket.gethostname()} 999999")
+    with RunLock(store.resolve(run), timeout=5):
+        pass
+
+
+def test_a_live_lock_times_out(store, run):
+    import socket
+
+    from strikecast.store.run_store import RunLock
+
+    path = store.resolve(run) / ".state.lock"
+    path.mkdir(parents=True)
+    (path / "owner").write_text(f"{socket.gethostname()} {__import__('os').getpid()}")
+    RunLock._held.pop(str(path.resolve()), None)
+    with pytest.raises(TimeoutError, match="could not lock"):
+        RunLock(store.resolve(run), timeout=0.2).acquire()
+
+
+def _hammer(root: str, stage: str, n: int) -> None:
+    from strikecast.store.run_store import RunKey, RunStore, StageState
+
+    store = RunStore(root)
+    key = RunKey("count", "m", "global", 42)
+    for i in range(n):
+        state = store.read_state(key, stage) or StageState(stage=stage)
+        state.folds_done = i + 1
+        state.parts.append({"path": f"p{i}", "from": i, "to": i, "rows": 1})
+        with store.lock(key):
+            current = store.read_state(key, stage) or StageState(stage=stage)
+            current.parts = state.parts
+            current.folds_done = state.folds_done
+            store.write_state(key, current)
+
+
+def test_two_processes_writing_different_stages_lose_nothing(tmp_path):
+    """C23: cv@42 and test@42 of one run are two concurrent jobs sharing state.json."""
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    root = str(tmp_path / "runs")
+    procs = [ctx.Process(target=_hammer, args=(root, stage, 40)) for stage in ("cv", "test")]
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(120)
+        assert proc.exitcode == 0
+    from strikecast.store.run_store import RunKey, RunStore
+
+    states = RunStore(root).read_states(RunKey("count", "m", "global", 42))
+    assert set(states) == {"cv", "test"}
+    assert states["cv"].folds_done == 40 and states["test"].folds_done == 40
+    assert not list((tmp_path / "runs").rglob("*.tmp"))

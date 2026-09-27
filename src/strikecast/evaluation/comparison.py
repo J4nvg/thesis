@@ -82,9 +82,10 @@ Notes
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Literal
 
@@ -93,9 +94,12 @@ import pandas as pd
 from scipy import stats as _scipy_stats
 
 __all__ = [
+    "BREAKDOWN_COLUMNS",
     "DEFAULT_BLOCK_LENGTH",
     "DEFAULT_N_BOOT",
     "DMResult",
+    "FAMILY_COLUMNS",
+    "FAMILY_PREFIXES",
     "JOIN_KEYS",
     "LOSSES",
     "LossName",
@@ -105,14 +109,21 @@ __all__ = [
     "cliffs_delta_magnitude",
     "compare_pair",
     "diebold_mariano",
+    "family_comparison",
+    "family_of",
     "loss_values",
     "mean_difference",
     "moving_block_indices",
     "paired_differences",
+    "pairwise_breakdowns",
     "pairwise_table",
     "per_origin_mean",
+    "tier_regions",
+    "write_family_comparison",
     "write_pairwise",
 ]
+
+logger = logging.getLogger(__name__)
 
 LossName = Literal["squared", "absolute"]
 
@@ -263,7 +274,6 @@ def block_bootstrap_ci(
     stat = statistic if statistic is not None else (lambda f: float(f[column].mean()))
     origins = np.sort(diff["origin_date"].unique())
     n = int(origins.size)
-    groups = {o: sub for o, sub in diff.groupby("origin_date")}
     rng = np.random.default_rng(seed)
     point = float(stat(diff))
     if n < 2:
@@ -277,10 +287,26 @@ def block_bootstrap_ci(
             "n_boot": int(n_boot),
         }
     reps = np.empty(int(n_boot), dtype=float)
-    for i in range(int(n_boot)):
-        idx = moving_block_indices(n, block_length, rng)
-        sample = pd.concat([groups[origins[j]] for j in idx], ignore_index=True)
-        reps[i] = float(stat(sample))
+    if statistic is None:
+        # The default statistic is the mean of `column`, and the mean over a
+        # concatenation of whole origins is (sum of the drawn origins' sums) /
+        # (sum of their non-NaN counts). Same number as rebuilding the frame,
+        # same draws, without 1000 `pd.concat` calls -- which is what makes a
+        # report over a real store finish in seconds instead of minutes.
+        grouped = diff.groupby("origin_date")[column]
+        sums = grouped.sum().sort_index().to_numpy(float)
+        counts = grouped.count().sort_index().to_numpy(float)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            for i in range(int(n_boot)):
+                idx = moving_block_indices(n, block_length, rng)
+                total = counts[idx].sum()
+                reps[i] = sums[idx].sum() / total if total else float("nan")
+    else:
+        groups = {o: sub for o, sub in diff.groupby("origin_date")}
+        for i in range(int(n_boot)):
+            idx = moving_block_indices(n, block_length, rng)
+            sample = pd.concat([groups[origins[j]] for j in idx], ignore_index=True)
+            reps[i] = float(stat(sample))
     lo, hi = np.percentile(reps, [100.0 * alpha / 2.0, 100.0 * (1.0 - alpha / 2.0)])
     return {
         "estimate": point,
@@ -561,6 +587,353 @@ def pairwise_table(
 
 def write_pairwise(frame: pd.DataFrame, path: str | Path) -> Path:
     """Write ``report/pairwise_<metric>.csv`` with ``index=False``."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(target, index=False)
+    return target
+
+
+# --------------------------------------------------------------------------- #
+# breakdowns: global, per horizon, per activity tier (plan sec. 7.2 item 6)
+# --------------------------------------------------------------------------- #
+def _breakdown_columns() -> tuple[str, ...]:
+    """:class:`PairSummary`'s fields with ``breakdown``/``tier`` after ``scope``."""
+    names = [f.name for f in fields(PairSummary)]
+    cut = names.index("scope") + 1
+    return (*names[:cut], "breakdown", "tier", *names[cut:])
+
+
+#: Column order of ``report/pairwise_<metric>.csv``.
+BREAKDOWN_COLUMNS: tuple[str, ...] = _breakdown_columns()
+
+
+def tier_regions(
+    activity_by_region: Mapping[str, Any], regions: Iterable[str] | None = None
+) -> dict[str, list[str]]:
+    """``{tier label: [regions]}``, restricted to ``regions`` when given.
+
+    The tier label is ``str(level)`` so it survives a CSV round trip; regions
+    whose level is missing or NaN are dropped, which is the same thing
+    :func:`strikecast.evaluation.aggregate.evaluate` does to its activity views
+    (its Q4) and is why an activity breakdown can cover fewer regions than the
+    global one.
+    """
+    keep = None if regions is None else set(regions)
+    out: dict[str, list[str]] = {}
+    for region, level in activity_by_region.items():
+        if keep is not None and region not in keep:
+            continue
+        if level is None or (isinstance(level, float) and math.isnan(level)):
+            continue
+        out.setdefault(str(level), []).append(str(region))
+    return {tier: sorted(members) for tier, members in sorted(out.items())}
+
+
+def pairwise_breakdowns(
+    frames: Mapping[str, pd.DataFrame],
+    *,
+    loss: LossName | str = "squared",
+    horizons: Iterable[int] | None = None,
+    activity_by_region: Mapping[str, Any] | None = None,
+    channel: str | None = None,
+    block_length: int = DEFAULT_BLOCK_LENGTH,
+    n_boot: int = DEFAULT_N_BOOT,
+    alpha: float = 0.05,
+    seed: int = 0,
+    hln: bool = True,
+    weights: str = "bartlett",
+    ordered: bool = False,
+) -> pd.DataFrame:
+    """Every pair of ``frames`` on every plan sec. 7.2 item 6 breakdown.
+
+    Three breakdowns per pair, each a row: ``global`` (every horizon pooled),
+    one ``horizon`` row per horizon, and one ``tier`` row per activity level
+    when ``activity_by_region`` is given. ``horizons=None`` uses every horizon
+    present in the frames; pass ``()`` to suppress the per-horizon rows.
+
+    Degrades rather than raises: a pair with no shared forecast instance on a
+    breakdown (different schedules, a tier one model never saw) is logged and
+    skipped, so a partial store still produces a table. The returned frame
+    always has :data:`BREAKDOWN_COLUMNS`, empty or not.
+    """
+    labels = list(frames)
+    if horizons is None:
+        present: set[int] = set()
+        for frame in frames.values():
+            present.update(int(h) for h in pd.unique(frame["horizon"]))
+        horizon_list: list[int] = sorted(present)
+    else:
+        horizon_list = [int(h) for h in horizons]
+    tiers = (
+        {}
+        if activity_by_region is None
+        else tier_regions(
+            activity_by_region,
+            {r for frame in frames.values() for r in pd.unique(frame["region"])},
+        )
+    )
+
+    rows: list[dict[str, Any]] = []
+    for i, la in enumerate(labels):
+        for j, lb in enumerate(labels):
+            if la == lb or (not ordered and j < i):
+                continue
+            pair_seed = int(seed) + 1_000 * (i * len(labels) + j)
+            jobs: list[tuple[str, str | None, int | None, str]] = [
+                ("global", None, None, "pooled")
+            ]
+            jobs += [("horizon", None, h, f"h={h}") for h in horizon_list]
+            jobs += [("tier", tier, None, f"tier={tier}") for tier in tiers]
+            for offset, (breakdown, tier, horizon, scope) in enumerate(jobs):
+                a, b = frames[la], frames[lb]
+                if tier is not None:
+                    members = set(tiers[tier])
+                    a = a[a["region"].isin(members)]
+                    b = b[b["region"].isin(members)]
+                    if a.empty or b.empty:
+                        logger.debug("%s vs %s: no rows in tier %s", la, lb, tier)
+                        continue
+                try:
+                    summary = compare_pair(
+                        a,
+                        b,
+                        label_a=la,
+                        label_b=lb,
+                        loss=loss,
+                        horizon=horizon,
+                        scope=scope,
+                        channel=channel,
+                        block_length=block_length,
+                        n_boot=n_boot,
+                        alpha=alpha,
+                        seed=pair_seed + offset,
+                        hln=hln,
+                        weights=weights,
+                    )
+                except ValueError as exc:
+                    logger.debug("%s vs %s on %s: %s", la, lb, scope, exc)
+                    continue
+                row = summary.as_dict()
+                row["breakdown"] = breakdown
+                row["tier"] = tier
+                rows.append(row)
+    return pd.DataFrame.from_records(rows, columns=list(BREAKDOWN_COLUMNS))
+
+
+# --------------------------------------------------------------------------- #
+# seed-aware family comparison (plan sec. 7.2 item 5)
+# --------------------------------------------------------------------------- #
+#: Model-variant prefix -> the "model type" plan sec. 7.2 compares. Longest
+#: prefix wins; an unknown name falls back to its first underscore-separated
+#: token, so a new variant lands in a family named after itself rather than in
+#: the wrong one.
+FAMILY_PREFIXES: Mapping[str, str] = {
+    "lightgbm": "gbdt",
+    "xgboost": "gbdt",
+    "catboost": "gbdt",
+    "lstm": "rnn",
+    "gru": "rnn",
+    "naive": "naive",
+    "seasonal": "naive",
+    "linear": "linear",
+    "arima": "arima",
+    "chronos": "chronos",
+    "hurdle": "hurdle",
+    "spe": "classifier",
+    "damage": "damage",
+}
+
+#: Column order of ``report/family_comparison.csv``.
+FAMILY_COLUMNS: tuple[str, ...] = (
+    "experiment",
+    "stage",
+    "metric",
+    "aggregate",
+    "family_a",
+    "family_b",
+    "n_seeds",
+    "seeds",
+    "mean_a",
+    "mean_b",
+    "mean_diff",
+    "pct_improvement",
+    "sd_diff",
+    "t_lo",
+    "t_hi",
+    "p_value",
+    "n_runs_a",
+    "n_runs_b",
+    "deterministic",
+)
+
+
+def family_of(model: str, overrides: Mapping[str, str] | None = None) -> str:
+    """Which "model type" a model variant belongs to (:data:`FAMILY_PREFIXES`).
+
+    ``overrides`` is an explicit ``{model: family}`` map and always wins, so a
+    caller that knows better than the prefix table -- the experiment YAML, or
+    the paper's own grouping -- can say so.
+    """
+    if overrides is not None and model in overrides:
+        return str(overrides[model])
+    for prefix in sorted(FAMILY_PREFIXES, key=len, reverse=True):
+        if model.startswith(prefix):
+            return FAMILY_PREFIXES[prefix]
+    return model.split("_", 1)[0]
+
+
+def _family_values(
+    frame: pd.DataFrame, aggregate: str, lower_is_better: bool
+) -> pd.DataFrame:
+    """One value per ``(experiment, stage, metric, family, seed)``.
+
+    ``aggregate="mean"`` is plan sec. 7.2's "the family as a whole (all its
+    variants and paradigms)"; ``aggregate="best"`` is its "the best
+    configuration per family (as in Table 4)" and takes the minimum for an
+    error metric (``lower_is_better``), the maximum otherwise.
+    """
+    keys = ["experiment", "stage", "metric", "family", "seed"]
+    grouped = frame.groupby(keys, sort=True)
+    if aggregate == "mean":
+        values = grouped["value"].mean()
+    elif aggregate == "best":
+        values = grouped["value"].min() if lower_is_better else grouped["value"].max()
+    else:
+        raise ValueError(f"unknown aggregate {aggregate!r}, expected 'mean' or 'best'")
+    out = values.reset_index(name="value")
+    out["n_runs"] = grouped["value"].size().to_numpy()
+    return out
+
+
+def family_comparison(
+    rows: Any,
+    *,
+    families: Mapping[str, str] | None = None,
+    metrics: Sequence[str] | None = None,
+    stages: Sequence[str] | None = None,
+    aggregate: str = "mean",
+    lower_is_better: bool = True,
+    stochastic: Mapping[str, bool] | None = None,
+    alpha: float = 0.05,
+) -> pd.DataFrame:
+    """Plan sec. 7.2 item 5: family A minus family B on the SAME seed.
+
+    ``rows`` is the long metric frame of
+    :func:`strikecast.evaluation.leaderboard.metric_frame` (or the
+    :class:`~strikecast.evaluation.leaderboard.MetricRow` list it is built
+    from). Per seed, each family is reduced to one number (``aggregate``); the
+    two families are then joined **on the seed**, giving N paired differences,
+    and the row reports their mean, SD, Student-t interval and the paired
+    t-test p-value. That is what separates "A is better" from "A happened to
+    get a lucky seed".
+
+    Notes
+    -----
+
+    ``Q9`` **Paradigms are pooled into the family.** Plan sec. 7.2 defines the
+        family level as "all its variants and paradigms", so a family's per-seed
+        value averages (or takes the best of) every variant x paradigm cell that
+        completed for that seed. A family that ran more paradigms than another
+        is therefore not penalised by missing cells, but it *is* averaged over a
+        different population; ``n_runs_a`` / ``n_runs_b`` record how many cells
+        went into each side so that is visible.
+
+    ``Q10`` **Two deterministic families get a marker, never an interval.**
+        Deterministic models are run once and broadcast across seeds (plan
+        sec. 5.4), so their per-seed differences are identical by construction
+        and an interval computed from them would be a zero-width lie. When
+        ``stochastic`` says every model of BOTH families is deterministic the
+        row keeps its mean difference, sets ``sd_diff``/``t_lo``/``t_hi``/
+        ``p_value`` to NaN and sets ``deterministic=True`` (plan sec. 7.1).
+
+    ``Q11`` **Only seeds both families completed are paired.** A missing seed
+        shrinks ``n_seeds``; it is never filled in. ``seeds`` lists the ones
+        actually used.
+    """
+    from .leaderboard import metric_frame  # noqa: PLC0415 - avoids an import cycle
+    from .seeds import t_interval  # noqa: PLC0415 - avoids an import cycle
+
+    frame = rows if isinstance(rows, pd.DataFrame) else metric_frame(rows)
+    if frame.empty:
+        return pd.DataFrame(columns=list(FAMILY_COLUMNS))
+    frame = frame.copy()
+    if stages is not None:
+        frame = frame[frame["stage"].isin(list(stages))]
+    if metrics is not None:
+        frame = frame[frame["metric"].isin(list(metrics))]
+    if frame.empty:
+        return pd.DataFrame(columns=list(FAMILY_COLUMNS))
+    frame["family"] = [family_of(str(m), families) for m in frame["model"]]
+    deterministic_family = {
+        family: bool(
+            stochastic is not None
+            and len(models) > 0
+            and all(not stochastic.get(str(m), True) for m in models)
+        )
+        for family, models in frame.groupby("family")["model"].unique().items()
+    }
+
+    values = _family_values(frame, aggregate, lower_is_better)
+    records: list[dict[str, Any]] = []
+    for (experiment, stage, metric), sub in values.groupby(
+        ["experiment", "stage", "metric"], sort=True
+    ):
+        family_list = sorted(sub["family"].unique())
+        for i, fa in enumerate(family_list):
+            for fb in family_list[i + 1 :]:
+                left = sub[sub["family"] == fa].set_index("seed").sort_index()
+                right = sub[sub["family"] == fb].set_index("seed").sort_index()
+                seeds = [int(s) for s in left.index.intersection(right.index)]
+                if not seeds:
+                    logger.debug("%s vs %s (%s): no shared seed", fa, fb, metric)
+                    continue
+                a = left.loc[seeds, "value"].to_numpy(float)
+                b = right.loc[seeds, "value"].to_numpy(float)
+                diff = a - b
+                mean_b = float(np.mean(b))
+                is_det = bool(
+                    deterministic_family.get(fa, False) and deterministic_family.get(fb, False)
+                )
+                if is_det or diff.size < 2:
+                    sd = float("nan")
+                    lo = hi = float("nan")
+                    p_value = float("nan")
+                else:
+                    sd = float(np.std(diff, ddof=1))
+                    lo, hi = t_interval(diff, alpha)
+                    p_value = float(_scipy_stats.ttest_1samp(diff, 0.0).pvalue)
+                records.append(
+                    {
+                        "experiment": experiment,
+                        "stage": stage,
+                        "metric": metric,
+                        "aggregate": aggregate,
+                        "family_a": fa,
+                        "family_b": fb,
+                        "n_seeds": len(seeds),
+                        "seeds": ";".join(str(s) for s in seeds),
+                        "mean_a": float(np.mean(a)),
+                        "mean_b": mean_b,
+                        "mean_diff": float(np.mean(diff)),
+                        "pct_improvement": (
+                            float(100.0 * (mean_b - float(np.mean(a))) / mean_b)
+                            if mean_b
+                            else float("nan")
+                        ),
+                        "sd_diff": sd,
+                        "t_lo": lo,
+                        "t_hi": hi,
+                        "p_value": p_value,
+                        "n_runs_a": int(left.loc[seeds, "n_runs"].sum()),
+                        "n_runs_b": int(right.loc[seeds, "n_runs"].sum()),
+                        "deterministic": is_det,
+                    }
+                )
+    return pd.DataFrame.from_records(records, columns=list(FAMILY_COLUMNS))
+
+
+def write_family_comparison(frame: pd.DataFrame, path: str | Path) -> Path:
+    """Write ``report/family_comparison.csv`` with ``index=False``."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(target, index=False)

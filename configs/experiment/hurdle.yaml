@@ -9,6 +9,9 @@ defaults:
   - /tracking: wandb_online
   - /seeds: default
   - _self_
+  # Thesis-faithful feature mode (legacy expdecay7; count/diff also load the thesis' cached selection):
+  # `legacy=hurdle` loads configs/legacy/hurdle.yaml AFTER this file.
+  - /legacy: null
 
 name: hurdle
 
@@ -32,6 +35,12 @@ series:
     train: 0.70
     val: 0.10
     test: 0.20
+  # Audit 2026-09-26 A1/D1: the sixth window transform is the literal leaky
+  # integrator s_t = x_t + 2^(-1/7) s_{t-1} (`leaky7`), as the thesis text
+  # describes.  The thesis itself ran the buggy `expdecay7` (alpha weighting
+  # TODAY); reproduce it with `legacy=<experiment>` (configs/legacy/).
+  window:
+    expdecay: leaky
 
 # Plan sec. 2.3 "Target transform": identity; binary + count.  The composite's
 # `prob` channel is a probability, so a target transform here is rejected (F71).
@@ -54,37 +63,53 @@ common_kwargs:
 # seed are passed (final_hurdle.ipynb cell 9) -- and each head's covariates are
 # subset with its own top-100 (cell 11).  `feature_selection` is the count
 # head's, which is the family's headline model.
+#
+# The notebook re-selected in EVERY session with an unpinned hash seed, which is
+# what made the thesis hurdle unreproducible (audit A11/A12, B9).  Here each
+# head is selected ONCE by `strikecast featsel experiment=hurdle` -- CPU,
+# LightGBM `deterministic=True`, fixed threads, PYTHONHASHSEED=0 -- and cached
+# in the run store; cv/test jobs refuse to re-select (`require_cached`).
 feature_selection:
   selector: zipoisson_regressor   # LightGBMModel(objective="poisson"), fitted
                                   # with positive-only sample weights (cell 10)
-  device: cpu                     # no device kwarg in that builder; inert here
-  num_threads: null               # no thread kwarg either
+  device: cpu
+  num_threads: 8                  # the notebook passed no thread kwarg
   top_k: 100
-  cache: false                    # this notebook writes no features/*.pkl
+  cache: true                     # the notebook cached nothing (cache: false)
   cache_path: null
+  deterministic: true
+  require_cached: true
 feature_selections:
   regressor:
     selector: zipoisson_regressor
     device: cpu
-    num_threads: null
+    num_threads: 8
     top_k: 100
-    cache: false
+    cache: true
     cache_path: null
+    deterministic: true
+    require_cached: true
   classifier:
     selector: zipoisson_classifier   # LightGBMClassifierModel(objective="binary",
                                      # is_unbalance=True)  (cell 9)
     device: cpu
-    num_threads: null
+    num_threads: 8
     top_k: 100
-    cache: false
+    cache: true
     cache_path: null
+    deterministic: true
+    require_cached: true
 
 # The three registry entries of `models/classifiers.py`, in notebook order.
 # F7: the hurdle family was never tuned, so none of them has a search space.
+# `paradigms:` is the thesis-faithful job matrix (audit 2026-09-26 C16/D8; job-
+# matrix metadata only): the two components run INSIDE the composite and are
+# never standalone jobs (`[]`); the composite ran Global/Activity/Local
+# (results/finalhurdle), with a CV stage because its calibrators are fit on CV.
 models:
-  - spe_event_classifier           # get_event_classifier() (cell 9)
-  - catboost_tweedie_count_head    # get_count_regressor()  (cell 9)
-  - hurdle                         # the composite the thesis reports
+  - {name: spe_event_classifier, paradigms: []}          # get_event_classifier() (cell 9)
+  - {name: catboost_tweedie_count_head, paradigms: []}   # get_count_regressor()  (cell 9)
+  - {name: hurdle, paradigms: [global, activity, local]} # the composite the thesis reports
 
 # Plan sec. 1 "Device policy": hurdle CatBoost on CPU.
 device:

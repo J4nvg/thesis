@@ -9,6 +9,9 @@ defaults:
   - /tracking: wandb_online
   - /seeds: default
   - _self_
+  # Thesis-faithful feature mode (legacy expdecay7; count/diff also load the thesis' cached selection):
+  # `legacy=count` loads configs/legacy/count.yaml AFTER this file.
+  - /legacy: null
 
 name: count
 
@@ -33,6 +36,12 @@ series:
     train: 0.70
     val: 0.10
     test: 0.20
+  # Audit 2026-09-26 A1/D1: the sixth window transform is the literal leaky
+  # integrator s_t = x_t + 2^(-1/7) s_{t-1} (`leaky7`), as the thesis text
+  # describes.  The thesis itself ran the buggy `expdecay7` (alpha weighting
+  # TODAY); reproduce it with `legacy=<experiment>` (configs/legacy/).
+  window:
+    expdecay: leaky
 
 # Plan sec. 2.3 "Target transform": identity for the count family.
 transform:
@@ -51,15 +60,25 @@ common_kwargs:
       future: [month, week, dayofyear, dayofweek, day]   # prevalent_functions.py:239
 
 # One `build_regressor("lightgbm_tweedie")` on level counts, objective tweedie,
-# variance power 1.5, device_type="gpu", top-100; shared with the RNNs
-# (_regression_GBDT.ipynb cell 28; plan sec. 2.3 "Feature selection").
+# variance power 1.5, top-100; shared with the RNNs (_regression_GBDT.ipynb
+# cell 28; plan sec. 2.3 "Feature selection").  The thesis fitted it on GPU
+# with `num_threads` commented out (Q9) -- configs/legacy/count.yaml restores
+# that together with the thesis' own cached set.  Publication runs (audit
+# 2026-09-26 A12/A13, D2) select afresh on the leaky7 features, ONCE, on CPU
+# with LightGBM `deterministic=True` and a fixed thread count, under
+# PYTHONHASHSEED=0, via `strikecast featsel experiment=count`; every later
+# cv/tune/test job loads that cached selection and refuses to re-select.
 feature_selection:
   selector: countreg
-  device: gpu          # device_type="gpu" in the tuned default builder (Q9)
-  num_threads: null    # `num_threads` is COMMENTED OUT in that builder
+  device: cpu
+  num_threads: 8
   top_k: 100           # get_top_100_from_lgbm -> df_gain.head(100) (prevalent_functions.py:264)
   cache: true
-  cache_path: features/countreg_saved_sets.pkl   # _regression_GBDT.py:595, _regression_LSTM.py:599
+  # The thesis' set (golden/converted/feature_sets/countreg.json) was selected on
+  # the legacy expdecay7 columns; it is only valid with `legacy=count`.
+  cache_path: null
+  deterministic: true
+  require_cached: true
 
 # GBM_VARIANTS (_regression_GBDT.py:118-121) then the RNN lineup of
 # _regression_LSTM.py:1126-1140, in legacy order.  REGRESSORS_TO_RUN
@@ -67,28 +86,32 @@ feature_selection:
 # golden/results/gbdt/leaderboard.csv has 36 rows = 6 variants x 3 paradigms x
 # 2 splits with no baseline row -- so the count family has no naive/linear/arima
 # entries (F84, F86).
+# `paradigms:` is the thesis-faithful job matrix (audit 2026-09-26 C16/D8; job-
+# matrix metadata only, no stage reads it): the GBDTs ran Global/Activity/Local
+# (golden/results/gbdt, 6 x 3 x 2 rows), the RNNs Global/Activity only
+# (golden/results/lstm, 15 x 2 x 2 rows -- the thesis never ran RNN x Local).
 models:
-  - lightgbm_poisson
-  - lightgbm_tweedie
-  - xgboost_poisson
-  - xgboost_tweedie
-  - catboost_poisson
-  - catboost_tweedie
-  - lstm_poisson_w7
-  - lstm_poisson_w14
-  - lstm_poisson_w28
-  - lstm_tweedie_w7
-  - lstm_tweedie_w14
-  - lstm_tweedie_w28
-  - lstm_w7
-  - lstm_w14
-  - lstm_w28
-  - gru_poisson_w7
-  - gru_poisson_w14
-  - gru_poisson_w28
-  - gru_tweedie_w7
-  - gru_tweedie_w14
-  - gru_tweedie_w28
+  - {name: lightgbm_poisson, paradigms: [global, activity, local]}
+  - {name: lightgbm_tweedie, paradigms: [global, activity, local]}
+  - {name: xgboost_poisson,  paradigms: [global, activity, local]}
+  - {name: xgboost_tweedie,  paradigms: [global, activity, local]}
+  - {name: catboost_poisson, paradigms: [global, activity, local]}
+  - {name: catboost_tweedie, paradigms: [global, activity, local]}
+  - {name: lstm_poisson_w7,  paradigms: [global, activity]}
+  - {name: lstm_poisson_w14, paradigms: [global, activity]}
+  - {name: lstm_poisson_w28, paradigms: [global, activity]}
+  - {name: lstm_tweedie_w7,  paradigms: [global, activity]}
+  - {name: lstm_tweedie_w14, paradigms: [global, activity]}
+  - {name: lstm_tweedie_w28, paradigms: [global, activity]}
+  - {name: lstm_w7,          paradigms: [global, activity]}
+  - {name: lstm_w14,         paradigms: [global, activity]}
+  - {name: lstm_w28,         paradigms: [global, activity]}
+  - {name: gru_poisson_w7,   paradigms: [global, activity]}
+  - {name: gru_poisson_w14,  paradigms: [global, activity]}
+  - {name: gru_poisson_w28,  paradigms: [global, activity]}
+  - {name: gru_tweedie_w7,   paradigms: [global, activity]}
+  - {name: gru_tweedie_w14,  paradigms: [global, activity]}
+  - {name: gru_tweedie_w28,  paradigms: [global, activity]}
 
 # Plan sec. 1 "Device policy": the count-family GBDTs ran on CPU.  The strings
 # are the legacy spellings, one per library.

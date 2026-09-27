@@ -1,0 +1,5 @@
+# @package _global_
+# Chronos-2 reads no engineered window features (no `ewm_*`/`rolling` columns,
+# `_chronos2.py`), so the legacy/leaky switch does not apply.  This file exists so
+# that `legacy=<experiment>` works uniformly for every experiment.
+{}

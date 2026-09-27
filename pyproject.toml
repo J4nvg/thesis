@@ -124,6 +124,21 @@ environments = [
 src = ["src", "src/strikecast"]
 line-length = 100
 target-version = "py313"
+# `ruff check .` is what CI runs (.github/workflows/ci.yml), so the exclusions
+# have to say which trees are NOT refactored code.
+extend-exclude = [
+  # Frozen thesis material. The notebooks, their `.py` exports and the legacy
+  # top-level `src/*.py` modules are the ORACLE the golden tests compare
+  # against (§6); reformatting them would change what is being compared.
+  # `src/strikecast/` is of course still linted.
+  "*.ipynb",
+  "_*.py",
+  "src/*.py",
+  "archive",
+  "tests/legacy_ref",
+  # Its own uv project with its own pins (§5.7).
+  "envs",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

@@ -267,6 +267,7 @@ def tune(
     *,
     out_dir: str | Path | None = None,
     write_artifacts: bool = True,
+    callbacks: Sequence[Callable[[Any, Any], None]] | None = None,
 ) -> TuningResult:
     """Run (or continue) one Optuna study and write its durable artefacts.
 
@@ -295,6 +296,16 @@ def tune(
         Overrides ``spec.n_trials`` / ``cfg.n_trials``. This is the TOTAL number
         of finished trials the study should end with, not the number to add: a
         study that already holds 30 finished trials optimises 20 more.
+    callbacks:
+        Optuna ``study.optimize`` callbacks, ``(study, frozen_trial) -> None``,
+        called after every finished trial. Additive and empty by default, so a
+        study behaves exactly as before when nothing is passed; the pipeline
+        uses one to mirror each trial to the tracker as it completes
+        (``tracker.log_trial``, §5.5) instead of replaying
+        ``trials_dataframe()`` after the study, which loses the live curve and
+        everything after a crash. A callback that raises would abort
+        ``optimize``, so the tracking one swallows its own errors -- the run
+        store, not the mirror, is the source of truth.
 
     Notes
     -----
@@ -346,6 +357,9 @@ def tune(
             catch=cfg.catch,
             gc_after_trial=cfg.gc_after_trial,
             show_progress_bar=cfg.show_progress_bar,
+            # Passed only when there is something to pass, so a study without
+            # callbacks calls `optimize` with exactly the legacy option set.
+            **({"callbacks": list(callbacks)} if callbacks else {}),
         )
     else:
         logger.info("study %r: %d trials already finished, nothing to do", name, done)

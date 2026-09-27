@@ -18,6 +18,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "golden: behaviour-preservation comparison against the legacy `src` package",
     )
+    config.addinivalue_line(
+        "markers",
+        "slow: minutes, not seconds -- fits a model or runs a real backtest. "
+        "Deselect with `-m 'not slow'` (what CI does).",
+    )
 
 
 @pytest.fixture(scope="session")

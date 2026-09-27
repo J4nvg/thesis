@@ -1,0 +1,24 @@
+# @package _global_
+# Thesis-faithful feature mode for the COUNT family (audit 2026-09-26 A1/A13, D1/D2/D9).
+#
+#   strikecast run experiment=count legacy=count ...
+#
+# Restores exactly what the thesis ran: the legacy `expdecay7` window transform
+# (pandas ewm with alpha=2^(-1/7) weighting TODAY -- the bug A1 describes) and the
+# thesis' own cached feature selection, frozen as JSON from
+# `features/countreg_saved_sets.pkl`.  That cache carries no provenance, so the
+# data stage accepts it ONLY under expdecay=legacy_alpha (A13 guard).  The selector
+# settings below are the thesis' (GPU, threads commented out); they are inert
+# because the cached set is loaded, and are restored so the snapshot says what
+# the thesis did.
+#
+# The run-store path has no feature tag: keep legacy runs and publication runs in
+# DIFFERENT store roots (`--store-root`), including `<exp>/tuning/<model>/`.
+series:
+  window:
+    expdecay: legacy_alpha
+feature_selection:
+  device: gpu          # device_type="gpu" in the tuned default builder (Q9)
+  num_threads: null    # `num_threads` is COMMENTED OUT in that builder
+  deterministic: false
+  cache_path: golden/converted/feature_sets/countreg.json

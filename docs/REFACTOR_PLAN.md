@@ -167,6 +167,10 @@ Default behaviour is always the current one. Flags marked "publication" are wort
 | F80 | Differencing and splitting do not commute at the CV boundary. The legacy diff CV schedules and slices on `target_for_cv_diff` (diff the full series, then `split_before`), 676 steps, while `Diff.forward` of the level CV view gives 675, so the natural engine wiring shifts every validation fold one day earlier. The test stage is unaffected because `forward(target_full)` equals the legacy full diff list. | `_diff_regression.py` split block vs `backtest/engine.py` | Resolved in the engine API: `iter_folds`/`run` take an explicit `model_targets` override, and the diff CV stage passes the legacy pair (`level_targets=target_for_cv`, `model_targets=target_for_cv_diff`). Reproduces the legacy runner to 1e-9, `tests/equivalence/test_diff_runners.py`; the natural wiring stays pinned as a strict xfail. The P3 config layer must build the diff CV stage this way. |
 | F81 | In the count family the Activity and Local paradigms route the VALIDATION stage through `run_final_test`, not `run_expanding_cv`: `run_expanding_cv_per_activity` and `run_expanding_cv_per_region` call `run_final_test` internally. The same model on the same folds is therefore post-processed differently per paradigm (Global CV takes the 200-sample median, Activity and Local CV do not). Latent for the same reason as F55 and F57. | `src/evaluation_tools.py:593-694` | Preserve. The backtest config records which adapter preset each paradigm and stage pair uses; the equivalence tests for the paradigm wrappers use `for_test`. Becomes real if a likelihood enters an RNN search space. |
 | F82 | The paradigm wrappers do not all expose `is_local`: the count family's per-activity and per-region wrappers and `run_final_test_diff_per_region` have no such parameter, only `run_final_test_diff_per_activity` passes it through. No local model could be run under those wrappers, so ARIMA was never run per region. | `src/evaluation_tools.py:593-694`, `_diff_regression.py:981-1005` | Preserve as a documented gap in what the thesis ran. `grouping.run_grouped` removes the asymmetry by construction; no reported paradigm-by-model combination is lost. |
+| F123 | The `per_region` view of the `classification` metric set has no reproducible row order. `final_hurdle.ipynb` cell 14 and the ported `evaluation/aggregate.py` both do `long_df.groupby("region")` then `.sort_values("F1", ascending=False)`, and on the stored hurdle classifier frames 10 of the 20 regions tie at `F1 == 0` -- they have no predicted positive at the hard-coded 0.5 threshold (F70). `sort_values` defaults to quicksort, which is not stable, so the surviving order among the tied regions is a property of the pandas build, and the pandas that wrote `golden/results/finalhurdle` and pandas 3.0.2 disagree. Aligned on `region`, every metric of every row is equal to 1e-9. | `final_hurdle.ipynb` cell 14, `src/strikecast/evaluation/aggregate.py`; `golden/results/finalhurdle/per_region_{cv,test}_global_classifier_{raw,cal}.csv` | Preserve: no tie-break is added, because the thesis had none and adding one would change which rows a reader of the CSV sees first. The golden comparison aligns that one view on `region` (`ORDER_INSENSITIVE_VIEWS` in `tests/golden/test_metrics_equality.py`) and keeps every other view strictly ordered. Publication: the per-region classifier table is not ranked in any meaningful way below the first ten rows, so quote it sorted by region or by a metric that does not tie. |
+| F124 | **CPU GBDT results are not portable.** F9 says the count-family GBDTs "run on CPU and are therefore bit-reproducible". They are reproducible on the same machine, not across machines. Re-running the diff family's CPU `lightgbm` at level E (macOS arm64, the pinned `lightgbm==4.6.0` / `darts==0.43.0`, the thesis' own `best_params.json` and the thesis' own cached covariates out of `features/diffreg_saved_sets.pkl`) reproduces `golden/results/diff/predictions_long_cv_global_lightgbm_tuned.parquet` only to max `|dy_pred|` 1.17 on fold 0 -- and the **verbatim legacy runner** (`tests/legacy_ref/diff_runners.py` with `diff_builders.build_gbm_from_params`) misses it by the same 1.17 in the same process, while the ported engine and that legacy runner agree to **0.0** over the folds compared. One different split decision cascades through 300 boosted trees. A second, smaller contributor: 34 of the 52 selected past covariates are `ewm_*` columns, where the pandas that wrote the cache and pandas 3.0.2 differ by about 1 ULP (max 1.1e-13), which is enough to move a LightGBM bin boundary; feeding the pipeline the cached covariates instead of its own only moves fold 0 from 1.18 to 1.17. | `golden/results/{gbdt,diff}`; `tests/golden/test_pipeline_equality.py`; refines F9 | Preserve -- there is nothing to fix in the code. Consequence for §6: **every GBDT moves from level E to level F**, and the port assertion for them is the in-process comparison against the legacy runner (`test_lightgbm_port_equals_the_legacy_runner`, exact) rather than the comparison against `golden/results` (tolerances recorded per case in `CASES`). The baselines (naives exact, `linear` 2.3e-09, ARIMA) stay at level E. Publication: the thesis' GBDT numbers are reproducible from the run store and the archived predictions, not from a re-run on other hardware; say so, and quote the seed CIs (§7.1) rather than point estimates. If bit-portability is wanted later, `deterministic: true` plus `force_row_wise` in the LightGBM builders is the switch -- it would change the recorded numbers, so it is NOT the default. |
+
+| F125 | **`TweedieDev` is discontinuous at `y_pred = 0`, and the diff family predicts across zero.** `base_metrics` computes `mean_tweedie_deviance(y_true, np.maximum(y_pred, EPS), power=1.5)` with `EPS = 1e-9`. At `power=1.5` a row with `y_true > 0` contributes `2*y*mu**-0.5`, so a prediction clipped to `EPS` contributes `2*1*(1e-9)**-0.5 ~= 63,245` while the SAME prediction a hair above zero (`+0.019`) contributes `~14.7`. The differenced branch reconstructs levels and routinely predicts small NEGATIVE counts, so the statistic is dominated by how many near-zero predictions happen to land below zero rather than by forecast quality. Measured on `diff/arima/global/seed=42/test` (22,960 rows) against `golden/results/diff/global_test_global_arima.json`: every other metric agrees to <= 3.1e-3 (MAE 6.3e-5, RMSE 4.5e-6, MASE_mean 4.4e-4), while `TweedieDev` differs by 5.3e-2 (294.04 vs 310.56). **Eight rows out of 22,960 explain 88.8% of that gap**, every one of them a `y_true == 1` day whose prediction straddles zero; golden clips 50 positive-label rows to `EPS`, the re-run clips 47, and those three sign flips are the whole difference. | `src/strikecast/evaluation/metrics.py::base_metrics`; `golden/results/diff/global_test_global_arima.json`; `tests/golden/test_pipeline_equality.py` | Preserve: the clip is the thesis' own and changing it would change every reported deviance. The golden case carries a per-metric ceiling for `TweedieDev` (`metric_tol_by_key`) set from the measurement above, so the other ten metrics keep their tight ceiling instead of being loosened to cover this one. **Publication: do not report `TweedieDev` (or `PoissonDev`, same clip, milder exponent) for the diff family** -- or report it on clipped-to-zero predictions with the clip stated. A reviewer who recomputes it on another BLAS will not reproduce the number, and the metric is not ranking the models on anything meaningful here. |
 
 Numbering note: F30, F32, F35, F38, F45, F48, F49 and F72 to F79 are deliberately unused. Phase 2's four work streams numbered their findings independently, the ranges overlapped, and the table above keeps the number that the delivered code cites for each observation.
 
@@ -228,7 +232,7 @@ src/strikecast/
   tracking/wandb_tracker.py    Tracker protocol; NoopTracker
   cli/main.py                  Hydra entry point: run, tune, evaluate, report, verify
 configs/                       Hydra YAML groups (experiment, model, paradigm, backtest,
-                               tracking, seeds, hydra/launcher)
+                               tracking, seeds)
 scripts/slurm/                 array-job templates
 notebooks/                     analysis + EDA only; read from the run store
 tests/unit  tests/equivalence  tests/golden
@@ -309,7 +313,7 @@ strikecast report experiment=count           # §7 tables and figures
 strikecast verify --golden golden/           # §6 comparisons
 ```
 
-Hydra lives only in `cli/`; the library takes plain pydantic configs. Multirun with the submitit launcher, or a plain SLURM array reading a `jobs.txt` matrix, replaces the four `tune_*.sh` scripts. Jobs declare their resource class (`cpu`, `gpu`) from the model spec.
+Hydra lives only in `cli/`; the library takes plain pydantic configs. A plain SLURM array reading a `jobs.txt` matrix (`scripts/slurm/`) replaces the four `tune_*.sh` scripts. Jobs declare their resource class (`cpu`, `gpu`) from the model spec.
 
 ### 5.7 Environment
 
@@ -529,16 +533,19 @@ models:
   - xgboost_tweedie
   - catboost_poisson
   - catboost_tweedie
-  - lstm_poisson_w7 # ... all rnn variants
-  - linear
-  - naive_last
-  - naive_weekly
-  # ARIMA lives in the diff experiment, not here
+  - lstm_poisson_w7 # ... all 15 rnn variants
+  # NO baselines: the count family has no linear, naive or ARIMA entry.
+  # `REGRESSORS_TO_RUN` in `_regression_GBDT.py` is dead code -- nothing
+  # iterates it -- and `golden/results/gbdt/leaderboard.csv` has 36 rows
+  # = 6 GBDT variants x 3 paradigms x 2 splits, with no baseline row
+  # (F84, F86). ARIMA lives in the diff experiment.
 device: {lightgbm: cpu, xgboost: cpu, catboost: cpu}   # the GBDTs ran on CPU
 tuning: {n_trials: 50, sampler: tpe, pruner: {kind: median, n_warmup_steps: 5},
          objective: RMSSE_mean}
 seeds: {tuning_seed: 42, eval_seeds: [42, 1, 2, 3, 4]}
 ```
+
+The model lineups above are illustrative; the **registry is the source of truth** and it follows the legacy scripts rather than this appendix -- `src/strikecast/models/classical.py` documents which family really ran which baseline.
 
 `configs/model/catboost_tweedie.yaml`
 ```yaml
