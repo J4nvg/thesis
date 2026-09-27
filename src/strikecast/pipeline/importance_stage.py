@@ -183,6 +183,14 @@ def run_importance(
 ) -> ImportanceOutcome:
     """Compute (or skip) the importance of one ``(model, paradigm, seed)``."""
     store = store if store is not None else RunStore(resolve_store_root(cfg))
+    if n_jobs is None or n_jobs < 1:
+        # Legacy passed n_jobs=-1 on Colab, where "all CPUs" meant 12 = the family's
+        # pinned thread count. On a 64-CPU cluster node -1 means 64 loky workers,
+        # each holding the model + design matrix and running CatBoost's own 12
+        # threads: workers were killed with SIGABRT (cluster jobs 64558/64559).
+        # Permutation seeds are drawn up front from random_state, so the result
+        # does not depend on n_jobs, and n_jobs is not part of the stage identity.
+        n_jobs = int(cfg.resolved_threads or 1)
     spec = get_spec(model_name, cfg.name)
     key = RunKey(cfg.name, model_name, str(paradigm), int(seed))
 
