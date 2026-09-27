@@ -580,3 +580,29 @@ def test_job_sbatch_optional_command_is_skipped_when_unknown(fake_repo) -> None:
                 env={"STRIKECAST_OPTIONAL": "1", "PYTHONPATH": str(fake_repo)})
     assert done.returncode == 0
     assert "not available in this checkout; skipping" in done.stdout
+
+
+def test_finished_verification_groups_are_not_resubmitted(monkeypatch, tmp_path) -> None:
+    """A resubmit re-queued verification jobs that had already finished."""
+    from types import SimpleNamespace
+
+    from strikecast.verification import legacy
+
+    cases = {
+        ("count", "cpu"): [SimpleNamespace(id="count__lightgbm_poisson__global__test")],
+        ("count", "gpu"): [SimpleNamespace(id="count__lstm_w7__global__test")],
+        ("diff", "cpu"): [SimpleNamespace(id="diff__arima__global__test"),
+                          SimpleNamespace(id="diff__linear__global__test")],
+    }
+    monkeypatch.setattr(legacy, "cases_for", lambda exp, resource=None: cases[(exp, resource)])
+    results = legacy.results_dir(tmp_path)
+    results.mkdir(parents=True)
+    (results / "count__lightgbm_poisson__global__test.json").write_text('{"status": "PASS"}')
+    (results / "count__lstm_w7__global__test.json").write_text('{"status": "ERROR"}')
+    (results / "diff__arima__global__test.json").write_text('{"status": "FAIL"}')
+    # diff linear has no result yet
+
+    pending = submit_all.verification_pending(
+        {"count": ["cpu", "gpu"], "diff": ["cpu"]}, tmp_path
+    )
+    assert pending == {"count": ["gpu"], "diff": ["cpu"]}

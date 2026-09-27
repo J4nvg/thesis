@@ -744,6 +744,37 @@ def importance_table(experiments: list[str]) -> dict[str, dict[str, tuple[str, .
     return {exp: default_jobs(exp) for exp in experiments if default_jobs(exp)}
 
 
+def verification_pending(
+    groups: dict[str, list[str]], store_root: Path
+) -> dict[str, list[str]]:
+    """Drop (experiment, resource) groups whose every case already has a result.
+
+    A case is finished once ``_verification/results/<case>.json`` exists with any
+    status but ERROR (a FAIL is a finished comparison; re-running it changes
+    nothing). Without this a later resubmit re-queued finished verification jobs.
+    """
+    from strikecast.verification import legacy  # noqa: PLC0415
+
+    results = legacy.results_dir(store_root)
+    pending: dict[str, list[str]] = {}
+    for exp, resources in groups.items():
+        for resource in resources:
+            cases = legacy.cases_for(exp, resource=resource)
+            done = True
+            for case in cases:
+                path = results / f"{case.id}.json"
+                try:
+                    status = json.loads(path.read_text(encoding="utf-8")).get("status")
+                except (OSError, ValueError):
+                    status = None
+                if status in (None, "ERROR"):
+                    done = False
+                    break
+            if not done:
+                pending.setdefault(exp, []).append(resource)
+    return pending
+
+
 def verify_table(matrices: dict[str, list[Any]]) -> dict[str, list[str]]:
     groups: dict[str, list[str]] = {}
     for exp, jobs in matrices.items():
@@ -1272,6 +1303,8 @@ def cmd_submit(argv: list[str]) -> int:
             verify = verify_table(build_matrices(
                 Options(**{**asdict(opts), "force": True, "stages": ["test"], "seeds": [42]})
             )[0])
+            if not opts.force:
+                verify = verification_pending(verify, REPO / opts.verify_store_root)
 
     # read-only (squeue), so the dry run shows exactly what a real submit would add
     queued = queued_from_earlier(opts.store_root)
