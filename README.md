@@ -181,7 +181,7 @@ rsync -avR golden/converted golden/results golden/checkpoints/chronos2_best/best
 runs `uv sync --frozen` for `.venv` and `envs/autogluon`, smoke-tests CUDA,
 LightGBM/XGBoost/CatBoost and downloads the Chronos-2 weights into
 `~/.cache/huggingface`). Optionally log in to W&B afterwards (runs are online,
-`strict: false`: a W&B problem never fails a job):
+`strict: false`: a W&B problem never fails a job; full guide in `docs/WANDB.md`):
 
 ```sh
 cd ~/thesis-refactor

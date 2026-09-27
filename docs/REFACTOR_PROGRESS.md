@@ -1314,3 +1314,15 @@ tests/golden` **1477 passed, 13 skipped, 1 xfailed, 0 failed**; `ruff check .` c
 tune 31, hurdle cv 3, test 84, importance 6, report 4, figures 1, verify 8). Stream 4 (WP4,
 `strikecast figures`, `impl_stream4.md`) launched. Not yet done: nothing has run on the cluster;
 fold-level resume deliberately not implemented (long jobs route to GPUExtended; tuning requeues).
+
+### WP4 + W&B — 2026-09-27
+
+- `strikecast figures [--source store|legacy]` (Stream 4, `impl_stream4.md`): every DATA/RESULTS
+  figure and table of the thesis as SVG + `.tex` body + CSV, `numbers.tex`, MANIFEST. `--source legacy`
+  reproduces the thesis tables except the known C6–C11/D6 mismatches (listed in the manifest);
+  coordinator re-ran it (30 generated, 9 static) and checked Table 4 by hand.
+- `docs/WANDB.md`: online W&B guide. Coordinator added `submit_all.py --wandb-project/--wandb-entity/
+  --wandb-tag` and a default `WANDB_DIR=<repo>/logs/wandb` in `job.sbatch`.
+- Suite: 1498 passed, 13 skipped, 1 xfailed; ruff clean.
+- Remaining: first cluster run (`--setup-only`, `--benchmark`), `main.tex` `\input` switch-over,
+  thesis/paper text fixes (CONSOLIDATED §5), W&B gaps 1/2/3/5 in `docs/WANDB.md`.

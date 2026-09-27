@@ -221,6 +221,7 @@ class Options:
     store_root: str = DEFAULT_STORE
     verify_store_root: str = VERIFY_STORE
     tracking: str | None = None
+    tracking_overrides: list[str] = field(default_factory=list)
     benchmark: bool = False
     benchmark_windows: int = 2
     benchmark_trials: int = 2
@@ -264,6 +265,18 @@ def time_keys(stage: str, family: str = "", resource: str = "", paradigm: str = 
     return seen
 
 
+def _tracking_overrides(args: argparse.Namespace) -> list[str]:
+    """Hydra overrides for the W&B coordinates, appended to every job line."""
+    out: list[str] = []
+    if args.wandb_project:
+        out.append(f"tracking.project={args.wandb_project}")
+    if args.wandb_entity:
+        out.append(f"tracking.entity={args.wandb_entity}")
+    if args.wandb_tag:
+        out.append("tracking.tags=[" + ",".join(args.wandb_tag) + "]")
+    return out
+
+
 def _store_args(root: str) -> list[str]:
     return ["--store-root", root]
 
@@ -305,6 +318,7 @@ def build_dag(
         return [name] if name in by_name or name in queued else []
 
     tracking = [f"tracking={opts.tracking}"] if opts.tracking else []
+    tracking += opts.tracking_overrides
     store = _store_args(opts.store_root)
     experiments = [e for e in opts.experiments if e in matrices or e in (importance_jobs or {})]
     uses_ag = any(
@@ -679,6 +693,7 @@ def build_matrices(opts: Options) -> tuple[dict[str, list[Any]], dict[str, Any]]
     if "test" in stages and opts.cv == "needed" and "cv" not in stages:
         stages.insert(stages.index("test"), "cv")  # a composite's test needs its CV
     overrides = [f"tracking={opts.tracking}"] if opts.tracking else []
+    overrides += opts.tracking_overrides
     matrices: dict[str, list[Any]] = {}
     info: dict[str, Any] = {}
     for exp in opts.experiments:
@@ -1113,6 +1128,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--tracking", default=None,
                    help="tracking group override (default: the config's wandb_online, "
                         "strict: false; noop for --benchmark)")
+    p.add_argument("--wandb-project", default=None,
+                   help="W&B project for every job (tracking.project=...; default: the config's)")
+    p.add_argument("--wandb-entity", default=None,
+                   help="W&B entity (user or team) for every job (tracking.entity=...)")
+    p.add_argument("--wandb-tag", action="append", default=[],
+                   help="extra W&B tag for every job; repeatable (tracking.tags=[...])")
     p.add_argument("--time-table", type=Path, default=None,
                    help=f"JSON time overrides (default {TIME_TABLE_FILE} when present)")
     p.add_argument("--long-threshold", type=float, default=LONG_THRESHOLD_H,
@@ -1158,6 +1179,7 @@ def options_from(args: argparse.Namespace) -> Options:
         store_root=args.store_root or (BENCHMARK_STORE if args.benchmark else DEFAULT_STORE),
         verify_store_root=args.verify_store_root,
         tracking=args.tracking or ("noop" if args.benchmark else None),
+        tracking_overrides=_tracking_overrides(args),
         benchmark=args.benchmark,
         benchmark_windows=args.benchmark_windows,
         benchmark_trials=args.benchmark_trials,

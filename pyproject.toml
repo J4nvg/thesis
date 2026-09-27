@@ -93,6 +93,13 @@ strikecast = "strikecast.cli.main:main"
 gpu = [
   "nvidia-ml-py3==7.352.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
+# `strikecast figures` EDA maps (audit C3): geopandas for the two oblast maps
+# (fig:strikeactivity_perregion*); ruptures only for the eda_full changepoint
+# cell (not a thesis figure). Without them those items are skipped, not fatal.
+figures = [
+  "geopandas>=1.0",
+  "ruptures>=1.1",
+]
 dev = [
   "pytest>=8",
   "ruff>=0.6",

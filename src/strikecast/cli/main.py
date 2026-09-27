@@ -12,6 +12,8 @@ Five subcommands::
     strikecast verify   --golden golden/                      # §6 comparisons
     strikecast featsel  experiment=count   # feature selection ONCE (needs PYTHONHASHSEED=0)
     strikecast importance experiment=count model=catboost_tweedie paradigm=activity seed=42
+    strikecast figures  --store-root runs_publication      # every thesis figure/table (WP4)
+    strikecast figures  --source legacy --out /tmp/figs     # same, from results/ (verification)
 
 Argument grammar
 ----------------
@@ -59,7 +61,7 @@ __all__ = ["main"]
 logger = logging.getLogger(__name__)
 
 COMMANDS: tuple[str, ...] = (
-    "run", "tune", "evaluate", "report", "verify", "featsel", "importance",
+    "run", "tune", "evaluate", "report", "verify", "featsel", "importance", "figures",
 )
 
 #: Selectors consumed by the CLI; never forwarded to Hydra.
@@ -153,6 +155,29 @@ def _parser() -> argparse.ArgumentParser:
         default=-1,
         help="importance: joblib workers for sklearn permutation_importance "
         "(legacy -1; it never changes a value)",
+    )
+    parser.add_argument(
+        "--source",
+        choices=("store", "legacy"),
+        default="store",
+        help="figures: read the run store (default) or the thesis' stored results/",
+    )
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="figures: output folder (default <store-root>/_figures)",
+    )
+    parser.add_argument(
+        "--results-dir", default="results", help="figures --source legacy: the results/ folder"
+    )
+    parser.add_argument("--data-dir", default="data", help="figures: the data/ folder (EDA)")
+    parser.add_argument(
+        "--seed", type=int, default=42, help="figures --source store: the evaluation seed"
+    )
+    parser.add_argument(
+        "--only",
+        default=None,
+        help="figures: comma-separated item ids (F12,T4,...) to build; default all",
     )
     parser.add_argument(
         "-v", "--verbose", action="count", default=0, help="-v for INFO, -vv for DEBUG"
@@ -502,9 +527,43 @@ def _run_interruptible(args: argparse.Namespace) -> int:
         interrupt.restore(previous)
 
 
+def _cmd_figures(args) -> int:
+    """``strikecast figures``: every DATA/RESULTS thesis figure and table (WP4).
+
+    Needs no Hydra config: it reads the run store (``--store-root``, default
+    ``runs``) or, with ``--source legacy``, the thesis' ``results/``. Missing
+    inputs skip the item (listed in ``MANIFEST.md``); only a failed builder
+    makes the exit code non-zero.
+    """
+    from strikecast.reporting.build import build_all  # noqa: PLC0415
+    from strikecast.reporting.sources import make_source  # noqa: PLC0415
+
+    store_root = Path(args.store_root or "runs")
+    out = Path(args.out) if args.out else store_root / "_figures"
+    source = make_source(
+        args.source,
+        store_root=store_root,
+        seed=args.seed,
+        results_dir=args.results_dir,
+        golden_dir=args.golden,
+    )
+    only = [s.strip() for s in args.only.split(",")] if args.only else None
+    items = build_all(source, out, data_dir=args.data_dir, only=only)
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item.status] = counts.get(item.status, 0) + 1
+        if item.status in ("skipped", "failed"):
+            print(f"  {item.id:4s} {item.status}: {item.reason}")
+    print(f"figures ({source.describe()}) -> {out}: "
+          + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
+    return 1 if counts.get("failed") else 0
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "verify":
         return _cmd_verify(args)
+    if args.command == "figures":
+        return _cmd_figures(args)
 
     experiment, selectors, overrides = split_overrides(args.overrides)
     cfg = _load(experiment, overrides, selectors, args)

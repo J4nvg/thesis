@@ -46,6 +46,9 @@ export PYTHONUNBUFFERED=1
 export PATH="$HOME/.local/bin:$PATH"
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}"
+# W&B writes a local run folder even online; keep them out of the repo root.
+export WANDB_DIR="${WANDB_DIR:-$REPO/logs/wandb}"
+mkdir -p "$WANDB_DIR"
 
 case "$ENV_NAME" in
   main) PY="$REPO/.venv/bin/python" ;;
