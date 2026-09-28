@@ -232,6 +232,8 @@ class Options:
     benchmark_trials: int = 2
     verify_windows: int = 2
     force: bool = False
+    #: build the matrix as if the store were empty, without forcing reruns (``--adopt``)
+    ignore_store: bool = False
     setup: str = "auto"  # auto | always | never
     long_threshold: float = LONG_THRESHOLD_H
     max_requeues: int = MAX_REQUEUES
@@ -689,6 +691,49 @@ def squeue_ids() -> dict[str, dict[str, str]] | None:
     return jobs
 
 
+def squeue_names() -> dict[str, str] | None:
+    """``node name -> job id`` of the user's queued/running ``sc:<node>`` jobs, or None."""
+    try:
+        out = subprocess.run(
+            ["squeue", "-h", "-u", os.environ.get("USER", ""), "-o", "%i|%j"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    found: dict[str, str] = {}
+    for line in out.splitlines():
+        job_id, _, name = line.partition("|")
+        if name.startswith("sc:"):
+            found[name[3:]] = job_id
+    return found
+
+
+def adopt(nodes: list[Node], opts: Options, live: dict[str, str]) -> list[Node]:
+    """Attach already-submitted job ids to ``nodes`` (after an interrupted submit).
+
+    A node's id is its live ``sc:<name>`` job, else the newest log
+    ``logs/slurm/<stage>/<name>-<id>.out`` (a job that already ran). Nodes with
+    neither were never submitted and are left out, and listed.
+    """
+    ids: dict[str, str] = {}
+    kept: list[Node] = []
+    for node in nodes:
+        job_id = live.get(node.name)
+        if job_id is None:
+            logs = (REPO / LOG_ROOT / node.stage).glob(f"{sanitize(node.name)}-*.out")
+            numbers = [p.stem.rsplit("-", 1)[1] for p in logs]
+            numbers = [n for n in numbers if n.isdigit()]
+            job_id = max(numbers, key=int) if numbers else None
+        if job_id is None:
+            print(f"  not submitted, left out: {node.name}")
+            continue
+        node.sbatch = sbatch_args(node, ids, opts)
+        node.job_id = job_id
+        ids[node.name] = job_id
+        kept.append(node)
+    return kept
+
+
 def manifests(directory: Path | None = None) -> list[Path]:
     directory = directory or REPO / MANIFEST_DIR
     return sorted(directory.glob("*.json")) if directory.is_dir() else []
@@ -753,7 +798,7 @@ def build_matrices(opts: Options) -> tuple[dict[str, list[Any]], dict[str, Any]]
             stages=stages,
             seeds=opts.seeds,
             overrides=overrides,
-            store=None if opts.force else store,
+            store=None if opts.force or opts.ignore_store else store,
             force=opts.force,
             get_spec=get_spec,
             cv=opts.cv,
@@ -910,8 +955,14 @@ def write_manifest(
             for n in nodes
         ],
     }
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(payload, indent=2, default=_json_default) + "\n", encoding="utf-8")
     return path
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (set, frozenset)):
+        return sorted(value)
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
 
 
 # --------------------------------------------------------------------------- #
@@ -1272,6 +1323,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--benchmark-trials", type=int, default=2)
     p.add_argument("--force", action="store_true", help="re-emit complete stages / tuned models")
     p.add_argument("--dry-run", action="store_true", help="print the DAG and sbatch lines only")
+    p.add_argument("--adopt", action="store_true",
+                   help="write the manifest for jobs an interrupted submit already queued "
+                        "(same arguments as that submit); submits nothing")
     p.add_argument("--allow-dirty", action="store_true",
                    help="submit from a dirty or unpushed checkout")
     return p
@@ -1325,6 +1379,8 @@ def options_from(args: argparse.Namespace) -> Options:
 def cmd_submit(argv: list[str]) -> int:
     args = _parser().parse_args(argv)
     opts = options_from(args)
+    if args.adopt:  # rebuild the full DAG of that submit, finished jobs included
+        opts.ignore_store = True
 
     git = git_state()
     if (git["dirty"] or git["unpushed"]) and not args.allow_dirty:
@@ -1378,7 +1434,24 @@ def cmd_submit(argv: list[str]) -> int:
           f"{' [BENCHMARK]' if opts.benchmark else ''}\n")
     print("\n".join(summarize(nodes)))
     print()
-    submit(nodes, opts, dry_run=args.dry_run, queued=queued)
+    if args.adopt:
+        live = squeue_names()
+        if live is None:
+            raise SystemExit("--adopt needs squeue (run it on the login node)")
+        nodes = adopt(nodes, opts, live)
+        if not nodes:
+            print("nothing to adopt: no queued job or log matches this DAG")
+            return 0
+        manifest = write_manifest(nodes, opts, git, info, argv)
+        print(f"\nadopted {len(nodes)} job(s); manifest {manifest.relative_to(REPO)}")
+        return 0
+    try:
+        submit(nodes, opts, dry_run=args.dry_run, queued=queued)
+    except (KeyboardInterrupt, SystemExit):
+        if not args.dry_run and any(n.job_id for n in nodes):
+            partial = write_manifest([n for n in nodes if n.job_id], opts, git, info, argv)
+            print(f"\ninterrupted: partial manifest {partial.relative_to(REPO)}", file=sys.stderr)
+        raise
     if args.dry_run:
         print(f"\n(dry run: {len(nodes)} job(s), nothing submitted)")
         return 0

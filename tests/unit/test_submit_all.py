@@ -642,3 +642,24 @@ def test_runs_option_parses_and_restricts_experiments() -> None:
     opts = submit_all.options_from(args)
     assert opts.experiments == ["hurdle"]
     assert opts.runs == {("hurdle", "hurdle", "global")}
+
+
+def test_manifest_serializes_run_sets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(submit_all, "REPO", tmp_path)
+    opts = submit_all.Options(runs={("hurdle", "hurdle", "global")})
+    path = submit_all.write_manifest([], opts, {"commit": "x"}, {}, ["--runs", "hurdle:hurdle:global"])
+    assert json.loads(path.read_text())["options"]["runs"] == [["hurdle", "hurdle", "global"]]
+
+
+def test_adopt_takes_live_ids_then_newest_logs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(submit_all, "REPO", tmp_path)
+    by, nodes = dag()
+    runs = [n for n in nodes if n.stage == "test"][:3]
+    live_one, logged, missing = runs
+    logs = tmp_path / submit_all.LOG_ROOT / "test"
+    logs.mkdir(parents=True)
+    for job_id in ("100", "205"):
+        (logs / f"{submit_all.sanitize(logged.name)}-{job_id}.out").write_text("")
+    kept = submit_all.adopt(runs, submit_all.Options(), {live_one.name: "300"})
+    assert [(n.name, n.job_id) for n in kept] == [(live_one.name, "300"), (logged.name, "205")]
+    assert missing.job_id is None
