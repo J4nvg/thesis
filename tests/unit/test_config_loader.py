@@ -263,22 +263,26 @@ def test_every_configured_device_matches_its_spec(name: str, configs) -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "selector", "device", "threads"),
+    ("name", "selector", "device", "threads", "figure"),
     [
         # One `build_regressor("lightgbm_tweedie")` on level counts, GPU, top-100.
-        ("count", "countreg", "gpu", None),
+        # Figure: the Tweedie selector is the family default (RNNs, *_tweedie).
+        ("count", "countreg", "gpu", None, "count_tweedie"),
         # Its own selection: objective "regression" on CPU with 4 threads.
-        ("diff", "diffreg", "cpu", 4),
+        # Figure: L2 on the DIFFERENCED target (Q8 resolved).
+        ("diff", "diffreg", "cpu", 4, "diff_l2"),
         # Library-default LightGBM, Poisson with positive-only weights (F27).
-        ("hurdle", "zipoisson_regressor", "cpu", 8),
-        # The damage family reuses the hurdle classifier selection, per key.
-        ("damage", "zipoisson_classifier", "cpu", 8),
+        # Figure: Tweedie 1.5 with positive-only weights (matches the head).
+        ("hurdle", "zipoisson_regressor", "cpu", 8, "hurdle_tweedie_pos"),
+        # The damage family reuses the hurdle classifier selection, per key; it
+        # stays on the legacy path (plan 2026-09-28 amendments).
+        ("damage", "zipoisson_classifier", "cpu", 8, "zipoisson_classifier"),
     ],
 )
 def test_feature_selection_is_per_family(
-    name: str, selector: str, device: str, threads: int | None, configs
+    name: str, selector: str, device: str, threads: int | None, figure: str, configs
 ) -> None:
-    """The THESIS selector settings, i.e. under ``legacy=<name>``.
+    """The THESIS selector settings under ``legacy=<name>``, the figure's otherwise.
 
     (hurdle/damage passed no device/thread kwarg at all, so their legacy
     overrides keep the deterministic publication settings: there is no thesis
@@ -286,25 +290,57 @@ def test_feature_selection_is_per_family(
     """
     fs = load_experiment(name, [f"legacy={name}"]).feature_selection
     assert fs.selector == selector
+    assert fs.protocol == "legacy"
     assert fs.device == device
     assert fs.num_threads == threads
     assert fs.top_k == 100  # F25: 100 LAGGED names, not 100 base features
-    # the publication config: same selector, deterministic CPU, cached once
+    # the publication config: the figure selector, deterministic CPU, cached once
     pub = configs[name].feature_selection
-    assert pub.selector == selector
+    assert pub.selector == figure
+    assert pub.protocol == ("legacy" if name == "damage" else "figure")
     assert (pub.device, pub.num_threads, pub.deterministic) == ("cpu", 8, True)
     assert pub.top_k == 100
 
 
 def test_the_hurdle_family_has_two_feature_selections(configs) -> None:
-    """F27: a binary selection for the classifier, a Poisson one for the count
-    head, each subsetting its own head's covariates (final_hurdle.ipynb cell 11)."""
+    """F27: a binary selection for the classifier, a count one for the count
+    head, each subsetting its own head's covariates (final_hurdle.ipynb cell 11).
+    Figure: ``hurdle_binary`` / ``hurdle_tweedie_pos``; ``legacy=hurdle``: the
+    thesis' ``zipoisson_*`` for the top level AND both heads."""
     cfg = configs["hurdle"]
-    assert cfg.feature_selection_for("classifier").selector == "zipoisson_classifier"
-    assert cfg.feature_selection_for("regressor").selector == "zipoisson_regressor"
+    assert cfg.feature_selection_for("classifier").selector == "hurdle_binary"
+    assert cfg.feature_selection_for("regressor").selector == "hurdle_tweedie_pos"
     # An unlisted head falls back to the family's own selection.
-    assert cfg.feature_selection_for("nope").selector == "zipoisson_regressor"
+    assert cfg.feature_selection_for("nope").selector == "hurdle_tweedie_pos"
     assert cfg.feature_selection_for() is cfg.feature_selection
+    legacy = load_experiment("hurdle", ["legacy=hurdle"])
+    assert legacy.feature_selection.selector == "zipoisson_regressor"
+    assert legacy.feature_selection_for("classifier").selector == "zipoisson_classifier"
+    assert legacy.feature_selection_for("regressor").selector == "zipoisson_regressor"
+
+
+def test_the_count_gbdts_route_to_the_selection_of_their_objective(configs) -> None:
+    """Plan 2026-09-28 sec. 5: ``*_poisson`` GBDTs -> ``count_poisson``,
+    ``*_tweedie`` -> ``count_tweedie``, RNNs ride along with the default (which
+    equals the tweedie one, so both form one group)."""
+    cfg = configs["count"]
+    groups = cfg.selection_groups()
+    assert list(groups) == ["poisson", None]
+    assert groups["poisson"] == ["lightgbm_poisson", "xgboost_poisson", "catboost_poisson"]
+    assert {"lightgbm_tweedie", "xgboost_tweedie", "catboost_tweedie"} <= set(groups[None])
+    assert all(m.startswith(("lstm", "gru")) or m.endswith("_tweedie") for m in groups[None])
+    assert cfg.for_selection("poisson").feature_selection.selector == "count_poisson"
+    assert cfg.for_selection("tweedie").feature_selection.selector == "count_tweedie"
+    # legacy=count: every key is the thesis' countreg set -> ONE group, as the thesis ran it
+    legacy = load_experiment("count", ["legacy=count"])
+    assert list(legacy.selection_groups()) == [None]
+    for key in ("poisson", "tweedie"):
+        head = legacy.for_selection(key).feature_selection
+        assert head == legacy.feature_selection
+        assert head.cache_path == "golden/converted/feature_sets/countreg.json"
+    # diff and hurdle have no per-model routing
+    for name in ("diff", "hurdle", "damage"):
+        assert list(configs[name].selection_groups()) == [None]
 
 
 def test_only_the_damage_family_selects_per_key(configs) -> None:

@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import (
@@ -500,13 +501,30 @@ class FeatureSelectionStageConfig(BaseModel):
         (``damage_classifier.ipynb`` cell 10 ``get_feature_selector_classifier``)
         with ``per_key=True``.
 
+    and the five selectors of the paper's pipeline figure (plan 2026-09-28;
+    :attr:`protocol` ``"figure"``), all on ONE shared skeleton
+    (``feature_selection.shared_selector_kwargs``) under the MATCHED objective
+    of the branch they feed; each ranks ``(feature, lag)`` past-covariate
+    columns by gain and keeps exactly ``top_k`` pairs, and every future
+    covariate is kept:
+
+    ``diff_l2``
+        L2 on the DIFFERENCED target (Q8 resolved): diff GBDTs and ``linear``.
+    ``count_poisson`` / ``count_tweedie``
+        Poisson / Tweedie 1.5 on level counts: the ``*_poisson`` / ``*_tweedie``
+        count GBDTs (routed by :attr:`ModelEntry.selection`).
+    ``hurdle_binary`` / ``hurdle_tweedie_pos``
+        binary with ``is_unbalance`` for the SPE classifier head; Tweedie 1.5
+        with positive-only weights for the CatBoost count head.
+
     ``device`` and ``num_threads`` carry the legacy values of the selected
     family and are passed through to the builder; they exist because a GPU
     LightGBM build is not available everywhere (quirk Q9), not because the
     methodology should change.
 
-    ``top_k`` counts *lagged* names, not base features, so ~52 past and ~8
-    future base features survive (flag F25).
+    ``top_k`` counts *lagged* names, not base features, so under the legacy
+    protocol ~52 past and ~8 future base features survive (flag F25); under
+    the figure protocol it is exactly ``top_k`` ``(feature, lag)`` pairs.
 
     ``cache``: the legacy runs cached the whole 9-tuple as
     ``features/<family>_saved_sets.pkl``.  Those cached sets are **data to
@@ -534,7 +552,17 @@ class FeatureSelectionStageConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     selector: Literal[
-        "countreg", "diffreg", "zipoisson_regressor", "zipoisson_classifier"
+        # protocol "legacy": the thesis (legacy=<family>)
+        "countreg",
+        "diffreg",
+        "zipoisson_regressor",
+        "zipoisson_classifier",
+        # protocol "figure": the paper's pipeline figure (plan 2026-09-28)
+        "diff_l2",
+        "count_poisson",
+        "count_tweedie",
+        "hurdle_binary",
+        "hurdle_tweedie_pos",
     ] = "countreg"
     device: str = "gpu"
     num_threads: int | None = None
@@ -565,16 +593,41 @@ class FeatureSelectionStageConfig(BaseModel):
             )
         return self
 
+    @property
+    def protocol(self) -> Literal["legacy", "figure"]:
+        """``"legacy"`` for the four thesis selectors, ``"figure"`` for the five new
+        ones. Derived from :attr:`selector`, never set (plan amendments), so it
+        is covered by the selector identity in every hash and provenance."""
+        from strikecast.data.feature_selection import protocol_of  # noqa: PLC0415
+
+        return protocol_of(self.selector)
+
     def build(self) -> FeatureSelectionConfig:
-        """The ``FeatureSelectionConfig`` of this family, from the legacy builders."""
+        """The ``FeatureSelectionConfig`` of this selector, from its builder."""
         from strikecast.data.feature_selection import (  # noqa: PLC0415  (keeps config light)
+            count_poisson_config,
+            count_tweedie_config,
             countreg_config,
+            diff_l2_config,
             diffreg_config,
+            hurdle_binary_config,
+            hurdle_tweedie_pos_config,
             zipoisson_classifier_config,
             zipoisson_regressor_config,
         )
 
-        if self.selector == "countreg":
+        figure_builders = {
+            "diff_l2": diff_l2_config,
+            "count_poisson": count_poisson_config,
+            "count_tweedie": count_tweedie_config,
+            "hurdle_binary": hurdle_binary_config,
+            "hurdle_tweedie_pos": hurdle_tweedie_pos_config,
+        }
+        if self.selector in figure_builders:
+            cfg = figure_builders[self.selector](
+                device_type=self.device, num_threads=self.num_threads
+            )
+        elif self.selector == "countreg":
             cfg = countreg_config(device_type=self.device, num_threads=self.num_threads)
         elif self.selector == "diffreg":
             cfg = diffreg_config(
@@ -650,6 +703,13 @@ class ModelEntry(BaseModel):
     #: Job-matrix metadata only: no stage reads it, so it never changes what a
     #: run computes, and an explicit selector still runs any paradigm.
     paradigms: list[Paradigm] | None = None
+    #: Which feature selection this model trains on: a key of
+    #: :attr:`ExperimentConfig.feature_selections`, or ``None`` for the
+    #: family's top-level :attr:`ExperimentConfig.feature_selection` (plan
+    #: 2026-09-28 sec. 5): the count ``*_poisson`` GBDTs name ``poisson``, the
+    #: ``*_tweedie`` ones ``tweedie``, and the RNNs ride along with the default.
+    #: Routing is by :meth:`ExperimentConfig.selection_groups`.
+    selection: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -944,6 +1004,10 @@ class ExperimentConfig(BaseModel):
     #: ``is_unbalance=True``) separately and subsets each head's covariates with
     #: its own top-100 (cell 11).  A head that is not listed falls back to
     #: :attr:`feature_selection`; see :meth:`feature_selection_for`.
+    #: The figure protocol (plan 2026-09-28) also uses it for per-MODEL
+    #: routing: ``count`` lists ``poisson`` and ``tweedie``, named by
+    #: :attr:`ModelEntry.selection` (see :meth:`selection_groups`). Only the
+    #: two hurdle keys make a family composite (``is_composite_family``).
     feature_selections: dict[str, FeatureSelectionStageConfig] = Field(default_factory=dict)
     models: list[ModelEntry] = Field(default_factory=list)
     paradigms: list[ParadigmConfig] = Field(default_factory=lambda: [ParadigmConfig()])
@@ -1012,6 +1076,59 @@ class ExperimentConfig(BaseModel):
             return self.feature_selection
         return self.feature_selections.get(head, self.feature_selection)
 
+    def for_selection(self, key: str | None) -> ExperimentConfig:
+        """A copy whose ``feature_selection`` is ``feature_selections[key]``.
+
+        The same narrowing ``data_stage.head_configs`` does per hurdle head, for
+        the per-model routing of the count/diff families (plan 2026-09-28
+        sec. 5): ``prepare_data(cfg.for_selection(key))`` builds exactly that
+        selection's artefacts, under its own content hash in the shared
+        ``shared/`` directory. ``None`` returns ``self`` unchanged.
+        """
+        if key is None:
+            return self
+        try:
+            narrowed = self.feature_selections[key]
+        except KeyError:
+            raise KeyError(
+                f"experiment {self.name!r} has no feature_selections[{key!r}]; "
+                f"known: {sorted(self.feature_selections)}"
+            ) from None
+        return self.model_copy(update={"feature_selection": narrowed})
+
+    def selection_groups(
+        self, models: Sequence[str] | None = None
+    ) -> dict[str | None, list[str]]:
+        """``selection key -> model names``, one entry per DISTINCT selection.
+
+        ``models`` defaults to every model of the experiment; the groups and the
+        names inside them follow the order of ``models``. A model's key is its
+        :attr:`ModelEntry.selection` (``None`` = the top-level selection).
+        Keys whose selection config EQUALS an earlier group's are merged into
+        that group -- the top-level one (``None``) first -- because an equal
+        config is the same content hash, i.e. the same data: in ``count.yaml``
+        the ``tweedie`` GBDTs join the RNNs under ``None``, and under
+        ``legacy=count`` (every key ``countreg``) all 21 models form one group,
+        as the thesis ran them. Consumers call
+        ``prepare_data(cfg.for_selection(key))`` once per group.
+        """
+        names = list(self.model_names if models is None else models)
+        canonical: list[tuple[str | None, FeatureSelectionStageConfig]] = [
+            (None, self.feature_selection)
+        ]
+        groups: dict[str | None, list[str]] = {}
+        for name in names:
+            key = self.model_entry(name).selection
+            fs = self.feature_selection_for(key)
+            for seen_key, seen_fs in canonical:
+                if seen_fs == fs:
+                    key = seen_key
+                    break
+            else:
+                canonical.append((key, fs))
+            groups.setdefault(key, []).append(name)
+        return groups
+
     def device_for(self, model_name: str) -> str:
         """Device for one model: entry override, then the family map, then cpu.
 
@@ -1068,6 +1185,15 @@ class ExperimentConfig(BaseModel):
         duplicates = sorted({n for n in names if names.count(n) > 1})
         if duplicates:
             raise ValueError(f"duplicate model names in experiment {self.name!r}: {duplicates}")
+
+        # plan 2026-09-28 sec. 5: a model's `selection` names a feature_selections key.
+        for entry in self.models:
+            if entry.selection is not None and entry.selection not in self.feature_selections:
+                raise ValueError(
+                    f"model {entry.name!r} of experiment {self.name!r} names selection "
+                    f"{entry.selection!r}, which is not a feature_selections key: "
+                    f"{sorted(self.feature_selections)}"
+                )
 
         paradigms = self.paradigm_names
         dupe_paradigms = sorted({p for p in paradigms if paradigms.count(p) > 1})

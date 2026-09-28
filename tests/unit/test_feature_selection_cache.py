@@ -138,7 +138,12 @@ def test_deterministic_needs_cpu_and_a_fixed_thread_count() -> None:
 
 
 @pytest.mark.parametrize(
-    "selector", ["countreg", "diffreg", "zipoisson_regressor", "zipoisson_classifier"]
+    "selector",
+    [
+        "countreg", "diffreg", "zipoisson_regressor", "zipoisson_classifier",
+        # the figure selectors (plan 2026-09-28) share the same switch
+        "diff_l2", "count_poisson", "count_tweedie", "hurdle_binary", "hurdle_tweedie_pos",
+    ],
 )
 def test_deterministic_build_pins_lightgbm(selector: str) -> None:
     kwargs = fs(selector, num_threads=3).build().model_kwargs

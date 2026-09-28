@@ -265,13 +265,14 @@ def _store(cfg: ExperimentConfig, args: argparse.Namespace):
 # subcommands
 # --------------------------------------------------------------------------- #
 def _cmd_run(cfg: ExperimentConfig, selectors: dict[str, list[str]], args) -> int:
-    from strikecast.pipeline import data_stage, run_stage  # noqa: PLC0415
+    from strikecast.pipeline import run_stage  # noqa: PLC0415
 
     store = _store(cfg, args)
-    data = data_stage.prepare_data(cfg, store)
+    # No pre-built data: run_experiment prepares one selection per group of
+    # models (plan "figure feature selection" §5), e.g. count_poisson and
+    # count_tweedie for the count family.
     outcomes = run_stage.run_experiment(
         cfg,
-        data=data,
         models=selectors.get("model"),
         paradigms=selectors.get("paradigm"),
         seeds=[int(s) for s in selectors["seed"]] if "seed" in selectors else None,
@@ -293,13 +294,12 @@ def _cmd_run(cfg: ExperimentConfig, selectors: dict[str, list[str]], args) -> in
 
 
 def _cmd_tune(cfg: ExperimentConfig, selectors: dict[str, list[str]], args) -> int:
-    from strikecast.pipeline import data_stage, tune_stage  # noqa: PLC0415
+    from strikecast.pipeline import tune_stage  # noqa: PLC0415
 
     store = _store(cfg, args)
-    data = data_stage.prepare_data(cfg, store)
+    # Per selection group, like `run` (tune_experiment prepares the data).
     outcomes = tune_stage.tune_experiment(
         cfg,
-        data=data,
         models=selectors.get("model"),
         store=store,
         n_trials=args.n_trials,
@@ -317,30 +317,31 @@ def _cmd_evaluate(cfg: ExperimentConfig, selectors: dict[str, list[str]], args) 
     No model is built and no fold is re-predicted: this is the cheap half of
     ``run``, for when a metric changes or a stage's metrics were lost.
     """
-    from strikecast.pipeline import data_stage  # noqa: PLC0415
-    from strikecast.pipeline.run_stage import _evaluate  # noqa: PLC0415
+    from strikecast.pipeline.run_stage import _evaluate, plan_selections  # noqa: PLC0415
     from strikecast.store import RunKey  # noqa: PLC0415
 
     store = _store(cfg, args)
-    data = data_stage.prepare_data(cfg, store)
     stages = tuple(selectors.get("stage", ("cv", "test")))
-    models = selectors.get("model") or cfg.model_names
     paradigms = selectors.get("paradigm") or [str(p) for p in cfg.paradigm_names]
     seeds = [int(s) for s in selectors.get("seed", [])] or list(cfg.seeds.eval_seeds)
 
     n = 0
-    for model in models:
-        for paradigm in paradigms:
-            for seed in seeds:
-                key = RunKey(cfg.name, model, paradigm, int(seed))
-                for stage in stages:
-                    if not store.part_paths(key, stage):
-                        continue
-                    preds = store.load_predictions(key, stage, legacy_order=True)
-                    views = _evaluate(cfg, data, cfg.stage(stage), paradigm, preds)
-                    store.write_metrics(key, stage, views)
-                    print(f"evaluated {key.relative()}/{stage}  rows={len(preds)}")
-                    n += 1
+    # One data stage per selection group; each model is scored with its own.
+    groups = plan_selections(cfg, store, models=selectors.get("model"))
+    for group_cfg, data, models in groups:
+        for model in models:
+            for paradigm in paradigms:
+                for seed in seeds:
+                    key = RunKey(cfg.name, model, paradigm, int(seed))
+                    for stage in stages:
+                        if not store.part_paths(key, stage):
+                            continue
+                        preds = store.load_predictions(key, stage, legacy_order=True)
+                        stage_cfg = group_cfg.stage(stage)
+                        views = _evaluate(group_cfg, data, stage_cfg, paradigm, preds)
+                        store.write_metrics(key, stage, views)
+                        print(f"evaluated {key.relative()}/{stage}  rows={len(preds)}")
+                        n += 1
     print(f"{n} stage(s) re-evaluated")
     return 0
 
@@ -445,7 +446,8 @@ def _cmd_importance(cfg: ExperimentConfig, selectors: dict[str, list[str]], args
     the thesis computed importances once, not per evaluation seed. Chronos-2
     needs ``envs/autogluon`` and a completed test stage of the same seed.
     """
-    from strikecast.pipeline import data_stage, importance_stage  # noqa: PLC0415
+    from strikecast.pipeline import importance_stage  # noqa: PLC0415
+    from strikecast.pipeline.run_stage import plan_selections  # noqa: PLC0415
 
     store = _store(cfg, args)
     seeds = [int(s) for s in selectors.get("seed", [])] or [int(cfg.seeds.tuning_seed)]
@@ -464,13 +466,19 @@ def _cmd_importance(cfg: ExperimentConfig, selectors: dict[str, list[str]], args
         raise SystemExit(
             f"no default importance jobs for experiment {cfg.name!r}; pass model=... paradigm=..."
         )
-    data = data_stage.prepare_data(cfg, store)
+    # Each model's importance is computed on the data of ITS selection group.
+    by_model = {
+        model: (group_cfg, data)
+        for group_cfg, data, models in plan_selections(cfg, store, models=list(jobs))
+        for model in models
+    }
     n_run = 0
     for seed in seeds:
         for model, paradigms in jobs.items():
+            group_cfg, data = by_model[model]
             for paradigm in paradigms:
                 outcome = importance_stage.run_importance(
-                    cfg,
+                    group_cfg,
                     model,
                     paradigm,
                     seed,

@@ -79,11 +79,15 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "MissingTunedParams",
     "StageOutcome",
+    "TunedParamsStale",
+    "check_tuned_features",
     "make_forecaster",
+    "plan_selections",
     "require_tuned_params",
     "resolve_params",
     "run_experiment",
     "run_stage",
+    "selection_groups",
     "stage_targets",
 ]
 
@@ -125,6 +129,7 @@ def resolve_params(
     spec: ModelSpec,
     model_name: str,
     store: RunStore,
+    features_hash: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Parameters for one model, and where they came from.
 
@@ -133,6 +138,13 @@ def resolve_params(
     mapped through ``spec.from_best_params`` (which is the identity for the
     GBDTs and the ``_build_lstm_from_best`` mapping for the RNNs), then the
     spec's legacy defaults.
+
+    ``features_hash`` is the selection the run will train on
+    (``data.features.hash``). When given, the stored study must have been tuned
+    on the same selection (:func:`check_tuned_features`, plan "figure feature
+    selection" §7): a mismatch raises :class:`TunedParamsStale` instead of
+    silently running a study's optimum on a feature space it never saw.
+    ``None`` (Chronos-2, which has no selection) skips the check.
     """
     entry = cfg.model_entry(model_name)
     if entry.params:
@@ -142,6 +154,8 @@ def resolve_params(
     if (directory / "best_params.json").is_file():
         from strikecast.tuning import load_best_params  # noqa: PLC0415
 
+        if features_hash is not None:
+            check_tuned_features(cfg, model_name, directory, features_hash)
         best = load_best_params(directory)
         return dict(spec.from_best_params(best)), "tuned"
 
@@ -153,6 +167,74 @@ def resolve_params(
             directory,
         )
     return dict(spec.defaults), "defaults"
+
+
+class TunedParamsStale(RuntimeError):
+    """A study's ``best_params.json`` (or an unfinished study) belongs to a
+    different feature selection than the one this run trains on.
+
+    ``best_params.json`` and the Optuna SQLite file are keyed on the model name
+    only, not on the selection, so after a re-selection (figure protocol, plan
+    §7) an old study would be resumed by ``load_if_exists`` and old optima
+    reused by cv/test. ``strikecast tune ... --force`` archives the directory
+    as ``<model>.stale-<hash>`` and tunes afresh.
+    """
+
+
+def recorded_features_hash(directory: Path) -> str | None:
+    """``provenance.features_hash`` of ``<directory>/best_params.json``, or ``None``.
+
+    Studies tuned by this pipeline carry it (``tune_stage._record_feature_provenance``);
+    the imported thesis params (``scripts/import_golden_params.py``, audit B1)
+    carry a provenance block without it.
+    """
+    import json  # noqa: PLC0415
+
+    path = directory / "best_params.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    provenance = payload.get("provenance") if isinstance(payload, dict) else None
+    value = provenance.get("features_hash") if isinstance(provenance, dict) else None
+    return str(value) if value else None
+
+
+def selection_protocol(cfg: ExperimentConfig) -> str:
+    """``"legacy"`` or ``"figure"``: the protocol of ``cfg``'s (narrowed) selection."""
+    return str(cfg.feature_selection.protocol)
+
+
+def check_tuned_features(
+    cfg: ExperimentConfig, model_name: str, directory: Path, features_hash: str
+) -> None:
+    """Refuse a ``best_params.json`` tuned on another selection (plan §7).
+
+    * recorded ``features_hash`` != ``features_hash`` -> :class:`TunedParamsStale`;
+    * no recorded hash (the imported thesis params) -> accepted only under the
+      legacy protocol (``legacy=<family>``), where they reproduce the thesis;
+      under the figure protocol they were tuned on the thesis selection, which
+      no figure run trains on.
+    """
+    recorded = recorded_features_hash(directory)
+    hint = (
+        f"Re-tune with `strikecast tune experiment={cfg.name} model={model_name} --force` "
+        f"(it archives {directory.name} as {directory.name}.stale-<hash>, nothing is deleted)."
+    )
+    if recorded is not None:
+        if recorded != features_hash:
+            raise TunedParamsStale(
+                f"{directory}/best_params.json was tuned on feature selection "
+                f"{recorded} but this run trains on {features_hash}. {hint}"
+            )
+        return
+    if selection_protocol(cfg) != "legacy":
+        raise TunedParamsStale(
+            f"{directory}/best_params.json records no features_hash: these are imported "
+            "thesis params, tuned on the thesis selection, and are valid only under the "
+            f"legacy protocol (legacy={cfg.name}). This run uses the figure protocol "
+            f"(selection {features_hash}). {hint}"
+        )
 
 
 class MissingTunedParams(RuntimeError):
@@ -291,27 +373,23 @@ def model_targets_for(
     Only the diff family's CV stage needs one (F80): the legacy script
     differences the FULL target list and only then takes the CV view, so its
     model-space list is one step longer than ``Diff.forward(level CV view)``.
-    Reproduced here by differencing the bundle's un-encoded full target list and
-    re-running the legacy encode+split on it, which is literally what
-    ``_diff_regression.py`` lines 234-239 do.
+    Reproduced by :func:`strikecast.data.series.model_space_parts`, which
+    differences the bundle's un-encoded full target list and re-runs the legacy
+    encode+split on it -- literally what ``_diff_regression.py`` lines 234-239
+    do. The figure protocol's ``diff_l2`` selector fits on the ``target_train``
+    of the same construction, so the two can never drift apart.
     """
     if cfg.transform.kind != "diff" or stage_name != "cv":
         return None
 
-    raw = data.bundle.raw
-    if raw is None:
+    if data.bundle.raw is None:
         raise ValueError(
             "the diff family's CV stage needs the bundle's un-encoded lists (F80); "
             "this bundle has raw=None"
         )
-    # `_encode_and_split` is `get_covs_and_encodings` minus the prints; using it
-    # keeps the encoders and the split identical to `build_bundle`'s.
-    from strikecast.data.series import _encode_and_split  # noqa: PLC0415
-    from strikecast.transforms.diff import Diff  # noqa: PLC0415
+    from strikecast.data.series import model_space_parts  # noqa: PLC0415
 
-    diffed = Diff().forward(list(raw.target))
-    parts = _encode_and_split(diffed, raw.past, raw.future, data.bundle.fractions)
-    return list(parts["target_cv_view"])
+    return list(model_space_parts(data.bundle)["target_cv_view"])
 
 
 def _covariates(
@@ -493,14 +571,16 @@ def run_stage(
         )
     stage_cfg = cfg.stage(stage_name)
     backtest_cfg = stage_cfg.backtest(cfg.split)
-    params, params_source = resolve_params(cfg, spec, model_name, store)
     key = RunKey(cfg.name, model_name, str(paradigm), int(seed))
     try:
+        params, params_source = resolve_params(
+            cfg, spec, model_name, store, features_hash=data.features.hash
+        )
         require_tuned_params(
             cfg, spec, model_name, params_source, store,
             allow_default_params=allow_default_params,
         )
-    except MissingTunedParams as exc:
+    except (MissingTunedParams, TunedParamsStale) as exc:
         # Recorded so `submit_all.py status` shows WHY the job failed.
         store.fail_stage(key, stage_name, f"{type(exc).__name__}: {exc}")
         raise
@@ -541,7 +621,7 @@ def run_stage(
     tracker = tracker if tracker is not None else make_tracker(cfg)
 
     seed_everything(int(seed))
-    ctx = make_run_context(cfg, model_name, int(seed))
+    ctx = make_run_context(cfg, model_name, int(seed), data)
 
     store.start_stage(
         key, stage_name, digest, params_source=params_source, max_folds=max_folds
@@ -824,6 +904,58 @@ def _fold_metrics_fn(
 
 
 # --------------------------------------------------------------------------- #
+# selection routing
+# --------------------------------------------------------------------------- #
+def selection_groups(
+    cfg: ExperimentConfig, models: Sequence[str] | None = None
+) -> dict[str | None, list[str]]:
+    """``selection key -> model names`` of the requested models.
+
+    :meth:`ExperimentConfig.selection_groups` owns the routing
+    (``ModelEntry.selection``, plan "figure feature selection" §5); ``None`` is
+    the top-level ``feature_selection``. Empty groups are dropped.
+    """
+    names = list(models) if models else None
+    return {key: list(group) for key, group in cfg.selection_groups(names).items() if group}
+
+
+def plan_selections(
+    cfg: ExperimentConfig,
+    store: RunStore,
+    *,
+    data: DataArtifacts | None = None,
+    models: Sequence[str] | None = None,
+) -> list[tuple[ExperimentConfig, DataArtifacts, list[str]]]:
+    """``(narrowed cfg, its data, its models)`` per selection group.
+
+    Each group's data comes from ONE ``prepare_data(cfg.for_selection(key))``,
+    so e.g. the count family's Poisson GBDTs train on the ``count_poisson``
+    selection and its Tweedie GBDTs (and the RNNs riding along) on
+    ``count_tweedie``. An explicit ``data`` holds one selection, so it is
+    accepted only when every requested model routes to the same key; anything
+    else would silently train a model on another branch's feature space.
+    """
+    groups = selection_groups(cfg, models)
+    if data is not None:
+        if len(groups) > 1:
+            listing = "; ".join(
+                f"{key or '<feature_selection>'}: {names}" for key, names in groups.items()
+            )
+            raise ValueError(
+                f"an explicit data= holds ONE feature selection, but the requested models "
+                f"of {cfg.name!r} route to {len(groups)} ({listing}). Pass data=None to "
+                "prepare one per selection, or restrict models= to one group."
+            )
+        key, names = next(iter(groups.items()), (None, []))
+        return [(cfg.for_selection(key), data, names)]
+    plan: list[tuple[ExperimentConfig, DataArtifacts, list[str]]] = []
+    for key, names in groups.items():
+        group_cfg = cfg.for_selection(key)
+        plan.append((group_cfg, _data_stage.prepare_data(group_cfg, store), names))
+    return plan
+
+
+# --------------------------------------------------------------------------- #
 # the sweep
 # --------------------------------------------------------------------------- #
 def run_experiment(
@@ -850,41 +982,44 @@ def run_experiment(
     * a **deterministic** model (``stochastic=False``: the naives, linear,
       ARIMA) runs once, under the first seed, and is broadcast across seeds by
       the report (§7.1).
+
+    Models run per selection group (:func:`plan_selections`), each under its
+    narrowed config and its own data, so the stage identity (``data.upstream``)
+    carries the selection the model actually trained on.
     """
     store = store if store is not None else RunStore(resolve_store_root(cfg))
-    if data is None:
-        data = _data_stage.prepare_data(cfg, store)
-
-    model_names = list(models) if models else cfg.model_names
     paradigm_names = list(paradigms) if paradigms else [str(p) for p in cfg.paradigm_names]
     seed_list = [int(s) for s in (seeds if seeds else cfg.seeds.eval_seeds)]
     tuning_seed = int(cfg.seeds.tuning_seed)
 
     outcomes: list[StageOutcome] = []
-    for model_name in model_names:
-        spec = get_spec(model_name, cfg.name)
-        for paradigm in paradigm_names:
-            for stage_name in stages:
-                if stage_name == "cv":
-                    stage_seeds = [tuning_seed]
-                elif not spec.stochastic:
-                    stage_seeds = seed_list[:1]
-                else:
-                    stage_seeds = seed_list
-                for seed in stage_seeds:
-                    outcomes.append(
-                        run_stage(
-                            cfg,
-                            model_name,
-                            paradigm,
-                            seed,
-                            stage_name,
-                            data,
-                            store=store,
-                            force=force,
-                            progress_every=progress_every,
-                            allow_default_params=allow_default_params,
-                            max_folds=max_folds,
+    for group_cfg, group_data, model_names in plan_selections(
+        cfg, store, data=data, models=models
+    ):
+        for model_name in model_names:
+            spec = get_spec(model_name, group_cfg.name)
+            for paradigm in paradigm_names:
+                for stage_name in stages:
+                    if stage_name == "cv":
+                        stage_seeds = [tuning_seed]
+                    elif not spec.stochastic:
+                        stage_seeds = seed_list[:1]
+                    else:
+                        stage_seeds = seed_list
+                    for seed in stage_seeds:
+                        outcomes.append(
+                            run_stage(
+                                group_cfg,
+                                model_name,
+                                paradigm,
+                                seed,
+                                stage_name,
+                                group_data,
+                                store=store,
+                                force=force,
+                                progress_every=progress_every,
+                                allow_default_params=allow_default_params,
+                                max_folds=max_folds,
+                            )
                         )
-                    )
     return outcomes

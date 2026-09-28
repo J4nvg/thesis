@@ -70,6 +70,7 @@ __all__ = [
     "SeriesBundle",
     "build_bundle",
     "load",
+    "model_space_parts",
     "positive_only_weights",
     "serialise",
     "split_series_list",
@@ -338,6 +339,34 @@ def subset_components(
         raw=replace(bundle.raw, past=past_subset, future=future_subset),
         **parts,
     )
+
+
+def model_space_parts(bundle: SeriesBundle) -> dict[str, Any]:
+    """The diff family's MODEL-SPACE lists: difference first, then encode + split.
+
+    ``Diff().forward(bundle.raw.target)`` on the un-encoded FULL target list,
+    then the legacy encode+split (:func:`_encode_and_split`) with the bundle's
+    own un-encoded past/future lists and fractions -- literally
+    ``_diff_regression.py`` lines 234-239. Differencing the full list before
+    the split is what makes the CV view one step longer than
+    ``Diff.forward(level CV view)`` (F80). Two consumers share it:
+
+    * ``run_stage``'s F80 model-space CV target (``["target_cv_view"]``);
+    * the figure's ``diff_l2`` selector, fitted on ``["target_train"]``, the
+      differenced target the diff models train on (resolves Q8; plan
+      2026-09-28). The legacy ``diffreg`` keeps the level target.
+
+    Returns the same dict as :func:`_encode_and_split`.
+    """
+    if bundle.raw is None:
+        raise ValueError(
+            "model_space_parts needs the bundle's un-encoded lists (F80); this bundle "
+            "has raw=None"
+        )
+    from strikecast.transforms.diff import Diff  # noqa: PLC0415
+
+    diffed = Diff().forward(list(bundle.raw.target))
+    return _encode_and_split(diffed, bundle.raw.past, bundle.raw.future, bundle.fractions)
 
 
 def _subset_safe(ts: TimeSeries, wanted: Iterable[str]) -> TimeSeries:

@@ -11,7 +11,7 @@ defaults:
   - /tracking: wandb_online
   - /seeds: default
   - _self_
-  # Thesis-faithful feature mode (legacy expdecay7; count/diff also load the thesis' cached selection):
+  # Thesis-faithful feature mode (legacy expdecay7 + the thesis selectors; count/diff also load the thesis' cached selection):
   # `legacy=diff` loads configs/legacy/diff.yaml AFTER this file.
   - /legacy: null
 
@@ -56,17 +56,21 @@ common_kwargs:
     cyclic:
       future: [month, week, dayofyear, dayofweek, day]
 
-# Its own selection: LightGBM with objective "regression" on CPU with 4 threads,
-# fitted on the LEVEL target while the models train on differences (plan
-# sec. 2.3 "Feature selection"; F29, Q8).
-# The thesis ran it with 4 threads (`available_threads = 4`, hard-coded,
-# _diff_regression.py:90) and cached it (`features/diffreg_saved_sets.pkl`,
+# Its own selection (pipeline figure, plan 2026-09-28): `diff_l2`, a preliminary
+# LightGBM on the shared count/diff skeleton with objective "regression" (L2),
+# fitted on the DIFFERENCED target the models train on (Q8 resolved), ranks the
+# (feature, lag) past-covariate columns by mean horizon-averaged gain and keeps
+# exactly the top 100 pairs for lightgbm/xgboost/catboost/linear; target lags,
+# statics and ALL future covariates are always kept.  The RNNs, ARIMA and the
+# naives ride along (raw past covariates / none), so no model needs a
+# `selection:` key.
+# The thesis fitted `diffreg` on the LEVEL target (F29, Q8) with 4 hard-coded
+# threads (_diff_regression.py:90) and cached it (`features/diffreg_saved_sets.pkl`,
 # converted to golden/converted/feature_sets/diffreg.json); configs/legacy/diff.yaml
-# restores both.  Publication runs (audit 2026-09-26 A12/A13, D2): fresh
-# selection on the leaky7 features, once, deterministic CPU LightGBM,
-# PYTHONHASHSEED=0, via `strikecast featsel experiment=diff`.
+# restores both.  Made ONCE on the leaky7 features -- deterministic CPU LightGBM,
+# PYTHONHASHSEED=0 (audit A12/A13, D2) -- by `strikecast featsel experiment=diff`.
 feature_selection:
-  selector: diffreg
+  selector: diff_l2
   device: cpu          # device_type="cpu"
   num_threads: 8
   top_k: 100

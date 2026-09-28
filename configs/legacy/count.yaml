@@ -12,13 +12,35 @@
 # because the cached set is loaded, and are restored so the snapshot says what
 # the thesis did.
 #
+# The thesis fed that ONE Tweedie selection to every model.  Hydra replaces lists,
+# so this overlay cannot touch `models:` (whose GBDTs still name `selection:
+# poisson` / `tweedie`); instead BOTH `feature_selections` keys are set back to
+# the identical `countreg` selection, so every model resolves to the same config,
+# one content hash and one data stage (`ExperimentConfig.selection_groups`), and
+# the legacy protocol (base-name collapse, all lags, filtered future covariates)
+# applies (plan 2026-09-28, amendments).
+#
 # The run-store path has no feature tag: keep legacy runs and publication runs in
 # DIFFERENT store roots (`--store-root`), including `<exp>/tuning/<model>/`.
 series:
   window:
     expdecay: legacy_alpha
 feature_selection:
+  selector: countreg   # build_regressor("lightgbm_tweedie"), _regression_GBDT.ipynb cell 28
   device: gpu          # device_type="gpu" in the tuned default builder (Q9)
   num_threads: null    # `num_threads` is COMMENTED OUT in that builder
   deterministic: false
   cache_path: golden/converted/feature_sets/countreg.json
+feature_selections:
+  poisson:
+    selector: countreg
+    device: gpu
+    num_threads: null
+    deterministic: false
+    cache_path: golden/converted/feature_sets/countreg.json
+  tweedie:
+    selector: countreg
+    device: gpu
+    num_threads: null
+    deterministic: false
+    cache_path: golden/converted/feature_sets/countreg.json

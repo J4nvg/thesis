@@ -4,12 +4,27 @@
 #   strikecast featsel experiment=hurdle legacy=hurdle      # once
 #   strikecast run     experiment=hurdle legacy=hurdle ...
 #
-# Only the window transform is legacy.  No cached thesis selection exists for the
-# hurdle heads (`zipoisson.json` is NOT the final hurdle's regressor set, A11; the
-# notebook re-selected in every session with an unpinned hash seed, A12/B9), so
-# the heads are selected once, deterministically, on the legacy expdecay7
-# columns, exactly as the publication config does it on the leaky7 columns.
+# The legacy window transform and the thesis' two selectors (final_hurdle.ipynb
+# cell 9): library-default LightGBM, Poisson with positive-only sample weights for
+# the count head (`zipoisson_regressor`) and binary with is_unbalance=True for the
+# event head (`zipoisson_classifier`), under the legacy protocol (base-name
+# collapse, all lags, filtered future covariates) instead of the figure's
+# `hurdle_tweedie_pos` / `hurdle_binary` (plan 2026-09-28).  The top-level
+# selection AND both heads are reset, since the heads are what the data stage reads.
+#
+# No cached thesis selection exists for the hurdle heads (`zipoisson.json` is NOT
+# the final hurdle's regressor set, A11; the notebook re-selected in every session
+# with an unpinned hash seed, A12/B9), so the heads are selected once,
+# deterministically (the publication device/threads are kept), on the legacy
+# expdecay7 columns.
 # Keep legacy and publication runs in different store roots (`--store-root`).
 series:
   window:
     expdecay: legacy_alpha
+feature_selection:
+  selector: zipoisson_regressor
+feature_selections:
+  regressor:
+    selector: zipoisson_regressor
+  classifier:
+    selector: zipoisson_classifier

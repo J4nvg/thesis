@@ -49,9 +49,8 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
 
-from strikecast.data.feature_selection import legacy_common_kwargs
 
-from .spec import ModelSpec, RunContext, register
+from .spec import ModelSpec, RunContext, darts_common_kwargs, register
 
 __all__ = ["NAIVE_NAMES"]
 
@@ -67,14 +66,15 @@ def _build_linear(params: Mapping[str, Any], ctx: RunContext) -> Any:
 
     ``LinearRegressionModel(**COMMON_KWARGS_TAB, multi_models=True)``: no
     hyper-parameters, no ``random_state``, no device.  ``params`` and ``ctx``
-    are accepted for the registry signature and deliberately ignored, because
-    the legacy builder ignored every global except ``COMMON_KWARGS_TAB``.
+    are accepted for the registry signature; ``ctx`` is read only for
+    ``past_lags`` (figure protocol, :func:`~strikecast.models.spec.darts_common_kwargs`),
+    because the legacy builder ignored every global except ``COMMON_KWARGS_TAB``
+    (no seed, no device).
     """
-    del ctx  # the legacy builder passes no seed and no device
     from darts.models import LinearRegressionModel
 
     return LinearRegressionModel(
-        **legacy_common_kwargs(),
+        **darts_common_kwargs(ctx),
         multi_models=True,
         **dict(params),
     )

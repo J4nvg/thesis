@@ -28,8 +28,12 @@ notebook global                 replacement
 ==============================  ==================================
 ``RANDOM_STATE`` (cell 1, 42)   ``ctx.seed``
 ``available_threads``           ``ctx.threads``
-``COMMON_KWARGS``               ``legacy_common_kwargs()``
+``COMMON_KWARGS``               ``darts_common_kwargs(ctx)``
 ==============================  ==================================
+
+:func:`~strikecast.models.spec.darts_common_kwargs` is ``legacy_common_kwargs()``
+unless ``ctx.past_lags`` is set (figure protocol, hurdle heads only via
+:meth:`~strikecast.models.spec.RunContext.for_head`); damage never sets it.
 
 ``COMMON_KWARGS = get_common_kwargs()`` is a single module-level dict in the
 notebook, shared by every model built in that session;
@@ -71,8 +75,7 @@ from darts.models import CatBoostModel, SKLearnClassifierModel
 from imbens.ensemble import SelfPacedEnsembleClassifier
 from sklearn.tree import DecisionTreeClassifier
 
-from strikecast.data.feature_selection import legacy_common_kwargs
-from strikecast.models.spec import ModelSpec, RunContext, register
+from strikecast.models.spec import ModelSpec, RunContext, darts_common_kwargs, register
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -129,7 +132,7 @@ def build_event_classifier(
         random_state=ctx.seed,
         n_jobs=ctx.threads,
     )
-    return SKLearnClassifierModel(model=clf, **legacy_common_kwargs())
+    return SKLearnClassifierModel(model=clf, **darts_common_kwargs(ctx))
 
 
 def build_damage_classifier(
@@ -152,7 +155,7 @@ def build_damage_classifier(
         random_state=ctx.seed,
         n_jobs=ctx.threads,
     )
-    return SKLearnClassifierModel(model=clf, **legacy_common_kwargs())
+    return SKLearnClassifierModel(model=clf, **darts_common_kwargs(ctx))
 
 
 def build_count_regressor(
@@ -171,7 +174,7 @@ def build_count_regressor(
     params = {} if params is None else params
     ctx = RunContext() if ctx is None else ctx
     return CatBoostModel(
-        **legacy_common_kwargs(),
+        **darts_common_kwargs(ctx),
         loss_function=LEGACY_COUNT_LOSS_FUNCTION,
         boost_from_average=False,
         random_seed=ctx.seed,
@@ -223,11 +226,18 @@ class DamageBuilders:
 
 
 def _build_hurdle(params: Mapping[str, Any], ctx: RunContext) -> HurdleBuilders:
+    """Two fresh-per-retrain head builders. Each head gets its own selection
+    (figure protocol: ``hurdle_binary`` for the classifier,
+    ``hurdle_tweedie_pos`` for the count head), so each builds from
+    ``ctx.for_head(<head>)``; with an empty ``ctx.head_past_lags`` both heads
+    fall back to the legacy all-lags skeleton."""
     classifier_params = dict(params.get("classifier", {}))
     regressor_params = dict(params.get("regressor", {}))
+    classifier_ctx = ctx.for_head("classifier")
+    regressor_ctx = ctx.for_head("regressor")
     return HurdleBuilders(
-        classifier_builder=lambda: build_event_classifier(classifier_params, ctx),
-        regressor_builder=lambda: build_count_regressor(regressor_params, ctx),
+        classifier_builder=lambda: build_event_classifier(classifier_params, classifier_ctx),
+        regressor_builder=lambda: build_count_regressor(regressor_params, regressor_ctx),
     )
 
 

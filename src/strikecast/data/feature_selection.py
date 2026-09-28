@@ -66,12 +66,51 @@ Q10 **The legacy selection is not reproducible at all.** The upstream helpers
     module does not fix it (behaviour-preserving refactor); the fix belongs
     upstream, in whatever replaces those two helpers, and the cached sets
     should be treated as data to load rather than output to reproduce.
+
+The figure protocol (paper pipeline figure, plan 2026-09-28)
+-----------------------------------------------------------
+Everything above describes ``protocol="legacy"``: the four thesis selectors
+(:data:`LEGACY_SELECTORS`), reproduced bit-for-bit behind ``legacy=<family>``.
+The paper follows the new pipeline figure instead (``protocol="figure"``, the
+five :data:`FIGURE_SELECTORS`): one preliminary LightGBM per tabular branch,
+all on ONE shared skeleton (:func:`shared_selector_kwargs`, the count/diff
+one), trained under the branch's MATCHED objective, target and weights:
+
+=====================  ===================  ==========  ==================
+selector               objective            target      weights
+=====================  ===================  ==========  ==================
+``diff_l2``            regression (L2)      differenced --
+``count_poisson``      poisson              level       --
+``count_tweedie``      tweedie, p=1.5       level       --
+``hurdle_binary``      binary, is_unbalance ``<T>_binary`` --
+``hurdle_tweedie_pos`` tweedie, p=1.5       level       positive-only
+=====================  ===================  ==========  ==================
+
+It ranks ``(feature, lag)`` PAST-covariate columns by mean horizon-averaged
+gain and keeps exactly ``top_k`` of them (:attr:`FeatureSelection.past_lags`);
+downstream GBDTs get exactly those pairs via darts per-component lags. Target
+lags, static covariates and the future covariates stay in the fit but never
+compete for a slot, and every future covariate is kept
+(:attr:`FeatureSelection.future_keep`). Three quirks are resolved there, and
+only there:
+
+* Q2 -- names are parsed with the strict trailing pattern
+  ``^(.+)_pastcov_lag(-\\d+)$`` (:func:`parse_pastcov_lag`), so a base name
+  containing ``_target`` or ``_pastcov`` is never truncated;
+* Q4 -- the cut is a STABLE sort on (``mean_gain`` desc, ``Feature`` asc), so
+  zero-gain ties are broken by name, and ``n_nonzero_gain`` is recorded;
+* Q8 -- ``diff_l2`` is fitted on the DIFFERENCED target the diff models train
+  on (``strikecast.data.series.model_space_parts``; the caller passes it).
+
+Gain is biased toward high-cardinality features; the paper names that as a
+limitation (permutation importance was rejected, 2026-09-28).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -80,20 +119,88 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
+    "FIGURE_SELECTORS",
+    "LEGACY_SELECTORS",
     "FeatureSelection",
     "FeatureSelectionConfig",
+    "PastLags",
+    "count_poisson_config",
+    "count_tweedie_config",
     "countreg_config",
+    "diff_l2_config",
     "diffreg_config",
+    "hurdle_binary_config",
+    "hurdle_tweedie_pos_config",
     "legacy_common_kwargs",
     "parse_feature_names",
+    "parse_pastcov_lag",
+    "past_lags_from_json",
+    "protocol_of",
     "rank_features_by_gain",
     "select_top_k",
+    "shared_selector_kwargs",
     "subset_safe",
     "zipoisson_classifier_config",
     "zipoisson_regressor_config",
 ]
 
 logger = logging.getLogger(__name__)
+
+#: The four thesis selectors, reproduced behind ``legacy=<family>``.
+LEGACY_SELECTORS: tuple[str, ...] = (
+    "countreg",
+    "diffreg",
+    "zipoisson_regressor",
+    "zipoisson_classifier",
+)
+
+#: The five selectors of the paper's pipeline figure (plan 2026-09-28).
+FIGURE_SELECTORS: tuple[str, ...] = (
+    "diff_l2",
+    "count_poisson",
+    "count_tweedie",
+    "hurdle_binary",
+    "hurdle_tweedie_pos",
+)
+
+Protocol = Literal["legacy", "figure"]
+
+#: ``((component, (lag, ...)), ...)`` in rank order of first appearance: the
+#: exact ``(feature, lag)`` pairs a figure-protocol selection keeps.
+PastLags = tuple[tuple[str, tuple[int, ...]], ...]
+
+#: Strict trailing pattern of a darts past-covariate lag column (resolves Q2).
+_PASTCOV_LAG = re.compile(r"^(.+)_pastcov_lag(-\d+)$")
+
+#: Version of the JSON :meth:`FeatureSelection.to_json` writes. 2 adds
+#: ``protocol``, ``past_lags`` and ``n_nonzero_gain``; a payload without
+#: ``schema`` is version 1 (``past_lags`` None).
+SELECTION_SCHEMA = 2
+
+
+def protocol_of(selector: str) -> Protocol:
+    """``"legacy"`` for the four thesis selectors, ``"figure"`` for the five new ones."""
+    if selector in LEGACY_SELECTORS:
+        return "legacy"
+    if selector in FIGURE_SELECTORS:
+        return "figure"
+    raise ValueError(
+        f"unknown selector {selector!r}; known: {LEGACY_SELECTORS + FIGURE_SELECTORS}"
+    )
+
+
+def parse_pastcov_lag(name: str) -> tuple[str, int] | None:
+    """``"<component>_pastcov_lag<-n>"`` -> ``(component, -n)``, else ``None``.
+
+    Strict and anchored at the END of the name, unlike the legacy
+    :func:`parse_feature_names` (Q2): ``a_target_b_pastcov_lag-7`` is
+    ``("a_target_b", -7)``, and target lags, future covariates, static
+    covariates and encoder columns never match.
+    """
+    match = _PASTCOV_LAG.match(name)
+    if match is None:
+        return None
+    return match.group(1), int(match.group(2))
 
 #: The four suffixes darts appends to a lagged feature name, in the order the
 #: legacy ``clean_feature_names`` tries them.
@@ -131,7 +238,10 @@ class FeatureSelectionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
     top_k: int = 100
-    objective: Literal["poisson", "regression", "binary"] = "poisson"
+    #: ``tweedie`` joined with the figure selectors (``count_tweedie``,
+    #: ``hurdle_tweedie_pos``); the legacy ``countreg`` still carries its tweedie
+    #: objective in ``model_kwargs`` under the headline ``poisson``.
+    objective: Literal["poisson", "regression", "binary", "tweedie"] = "poisson"
     model_kwargs: dict[str, Any] = Field(default_factory=dict)
     kind: Literal["regressor", "classifier"] = "regressor"
 
@@ -141,9 +251,9 @@ class FeatureSelectionConfig(BaseModel):
             from darts.models import LightGBMClassifierModel as _Model
         else:
             from darts.models import LightGBMModel as _Model
-        # ``model_kwargs`` wins on collision: the count family's selection
-        # model is the *tweedie* default builder, and ``objective`` is
-        # constrained to the three values the refactor plan names.
+        # ``model_kwargs`` wins on collision: the legacy ``countreg`` selection
+        # model is the *tweedie* default builder under the headline objective
+        # ``poisson``. The figure selectors never put ``objective`` there.
         kwargs: dict[str, Any] = {"objective": self.objective, **self.model_kwargs}
         return _Model(**kwargs)
 
@@ -211,14 +321,8 @@ def subset_safe(ts, wanted):
 # --------------------------------------------------------------------------- #
 # ranking
 # --------------------------------------------------------------------------- #
-def rank_features_by_gain(model) -> pd.DataFrame:
-    """Per-horizon LightGBM gain importances, aggregated and sorted.
-
-    Reproduces the frame built by ``get_top_100_from_lgbm`` / the inline FS
-    blocks, without the CSV side effect (Q6).  Columns:
-    ``Feature``, ``h1_gain`` ... ``hH_gain``, ``mean_gain``, ``agg_gain``
-    (Q5: the last two are identical; the legacy copies used one name each).
-    """
+def _gain_frame(model) -> pd.DataFrame:
+    """Per-horizon gain importances plus their mean, in design-matrix order."""
     gain_imps: dict[str, Any] = {"Feature": model.lagged_feature_names}
     underlying_model = model.model
     estimators = (
@@ -235,8 +339,35 @@ def rank_features_by_gain(model) -> pd.DataFrame:
     # point, both average the per-horizon gain columns only.
     df_gain["mean_gain"] = df_gain.filter(like="_gain").mean(axis=1)
     df_gain["agg_gain"] = df_gain["mean_gain"]
-    df_gain = df_gain.sort_values("mean_gain", ascending=False).reset_index(drop=True)
     return df_gain
+
+
+def rank_features_by_gain(model, *, protocol: Protocol = "legacy") -> pd.DataFrame:
+    """Per-horizon LightGBM gain importances, aggregated and sorted.
+
+    Reproduces the frame built by ``get_top_100_from_lgbm`` / the inline FS
+    blocks, without the CSV side effect (Q6).  Columns:
+    ``Feature``, ``h1_gain`` ... ``hH_gain``, ``mean_gain``, ``agg_gain``
+    (Q5: the last two are identical; the legacy copies used one name each).
+
+    ``protocol="legacy"`` sorts every lagged column with pandas' default,
+    non-stable sort (Q4). ``protocol="figure"`` keeps only the past-covariate
+    lag columns (:func:`parse_pastcov_lag`), adds their ``component`` and
+    ``lag``, and sorts STABLY on (``mean_gain`` desc, ``Feature`` asc).
+    """
+    df_gain = _gain_frame(model)
+    if protocol == "legacy":
+        return df_gain.sort_values("mean_gain", ascending=False).reset_index(drop=True)
+    if protocol != "figure":
+        raise ValueError(f"unknown protocol {protocol!r}; expected 'legacy' or 'figure'")
+    parsed = [parse_pastcov_lag(str(name)) for name in df_gain["Feature"]]
+    pool = df_gain.loc[[p is not None for p in parsed]].copy()
+    pairs = [p for p in parsed if p is not None]
+    pool["component"] = [c for c, _ in pairs]
+    pool["lag"] = [lag for _, lag in pairs]
+    return pool.sort_values(
+        ["mean_gain", "Feature"], ascending=[False, True], kind="mergesort"
+    ).reset_index(drop=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -244,7 +375,15 @@ def rank_features_by_gain(model) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 @dataclass
 class FeatureSelection:
-    """Result of :func:`select_top_k`."""
+    """Result of :func:`select_top_k`.
+
+    ``protocol``, ``past_lags`` and ``n_nonzero_gain`` are the figure-protocol
+    additions (JSON schema 2): ``past_lags`` holds the selected ``(feature,
+    lag)`` pairs grouped per component in rank order of first appearance, and
+    ``n_nonzero_gain`` counts the pool columns with positive mean gain. Under
+    the legacy protocol ``past_lags`` and ``n_nonzero_gain`` are ``None`` and
+    every kept base feature gets all its lags downstream.
+    """
 
     gain_table: pd.DataFrame
     selected: dict
@@ -252,23 +391,37 @@ class FeatureSelection:
     config: FeatureSelectionConfig
     available_past: list[str] = field(default_factory=list)
     available_future: list[str] = field(default_factory=list)
+    past_lags: PastLags | None = None
+    n_nonzero_gain: int | None = None
+    protocol: str = "legacy"
 
     @property
     def past_keep(self) -> list[str]:
-        """Surviving past-covariate components, sorted.
+        """Surviving past-covariate components.
 
-        Intersected with the components the covariate series actually has,
-        which is what the legacy ``subset_safe`` call did downstream and what
-        the cached ``*_saved_sets.pkl`` therefore contains.  Without it the
-        darts cyclic-encoder columns (``darts_enc_fc_cyc_*``) would leak in:
-        they carry a ``_futcov`` suffix in ``lagged_feature_names`` but are not
-        components of any input series.
+        Legacy: sorted, and intersected with the components the covariate
+        series actually has, which is what the legacy ``subset_safe`` call did
+        downstream and what the cached ``*_saved_sets.pkl`` therefore contains.
+        Without it the darts cyclic-encoder columns (``darts_enc_fc_cyc_*``)
+        would leak in: they carry a ``_futcov`` suffix in
+        ``lagged_feature_names`` but are not components of any input series.
+
+        Figure: the components of :attr:`past_lags`, in rank order.
         """
+        if self.protocol == "figure" and self.past_lags is not None:
+            return [component for component, _ in self.past_lags]
         return self._keep("pastcov_features_base", self.available_past)
 
     @property
     def future_keep(self) -> list[str]:
-        """Surviving future-covariate components, sorted (see :attr:`past_keep`)."""
+        """Surviving future-covariate components.
+
+        Legacy: the selected ones, sorted (see :attr:`past_keep`). Figure: ALL
+        available future components in their original order -- the figure feeds
+        every future covariate to every model, unfiltered.
+        """
+        if self.protocol == "figure":
+            return list(self.available_future)
         return self._keep("futcov_features_base", self.available_future)
 
     def _keep(self, key: str, available: list[str]) -> list[str]:
@@ -277,16 +430,41 @@ class FeatureSelection:
             return sorted(base)
         return sorted(base & set(available))
 
+    def write_ranking_csv(self, path: str | Path) -> Path:
+        """Write the gain ranking as CSV (``Feature``, ``h1_gain`` ... ``hH_gain``,
+        ``mean_gain``, ``selected``), in rank order.
+
+        Under the figure protocol this is the ``(feature, lag)`` pool only, so
+        it shows which past covariate matters at which lag; under the legacy one
+        it is every lagged column. The data stage writes it next to the
+        selection JSON as ``feature_selection.<hash>.ranking.csv``.
+        """
+        if self.gain_table.empty:
+            raise ValueError("this selection has no gain table (read back from JSON?)")
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        horizons = [c for c in self.gain_table.columns if _HORIZON_GAIN.fullmatch(str(c))]
+        frame = self.gain_table[["Feature", *horizons, "mean_gain"]].copy()
+        frame["selected"] = frame["Feature"].isin(set(self.top_features))
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        frame.to_csv(tmp, index=False)
+        tmp.replace(path)
+        return path
+
     def to_json(self, path: str | Path, *, provenance: dict[str, Any] | None = None) -> Path:
-        """Write the selection (not the gain table) as JSON.
+        """Write the selection (not the gain table) as JSON, schema 2.
 
         ``provenance`` (audit A13) records the window/selector configuration the
         selection was made under; ``strikecast.pipeline.data_stage`` refuses to
         reuse a selection whose provenance does not match the run.
+        ``past_lags`` is written as ``[[component, [lags]], ...]`` in rank order
+        (``null`` under the legacy protocol).
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "schema": SELECTION_SCHEMA,
+            "protocol": self.protocol,
             "config": self.config.model_dump(mode="json"),
             # JSON has no tuples, and darts reads `lags_future_covariates` as a
             # (past, future) *tuple* but as an explicit list of lags when given
@@ -301,6 +479,12 @@ class FeatureSelection:
             "selected": {k: sorted(self.selected[k]) for k in LEGACY_SELECTION_KEYS},
             "past_keep": self.past_keep,
             "future_keep": self.future_keep,
+            "past_lags": (
+                None
+                if self.past_lags is None
+                else [[component, list(lags)] for component, lags in self.past_lags]
+            ),
+            "n_nonzero_gain": self.n_nonzero_gain,
         }
         if provenance is not None:
             payload["provenance"] = provenance
@@ -312,9 +496,10 @@ class FeatureSelection:
 
     @classmethod
     def from_json(cls, path: str | Path) -> FeatureSelection:
-        """Read back a selection written by :meth:`to_json`.
+        """Read back a selection written by :meth:`to_json` (schema 1 or 2).
 
-        ``gain_table`` comes back empty -- it is not persisted.
+        ``gain_table`` comes back empty -- it is not persisted. A schema-1
+        payload is a legacy selection: ``protocol="legacy"``, ``past_lags=None``.
         """
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
         selected = {k: set(v) for k, v in payload["selected"].items()}
@@ -331,7 +516,30 @@ class FeatureSelection:
             config=FeatureSelectionConfig(**config_payload),
             available_past=list(payload.get("available_past", [])),
             available_future=list(payload.get("available_future", [])),
+            past_lags=past_lags_from_json(payload.get("past_lags")),
+            n_nonzero_gain=payload.get("n_nonzero_gain"),
+            protocol=str(payload.get("protocol", "legacy")),
         )
+
+
+_HORIZON_GAIN = re.compile(r"h\d+_gain")
+
+
+def past_lags_from_json(value: Any) -> PastLags | None:
+    """``[[component, [lags]], ...]`` (JSON) -> :data:`PastLags`; ``None`` stays ``None``."""
+    if value is None:
+        return None
+    return tuple((str(component), tuple(int(lag) for lag in lags)) for component, lags in value)
+
+
+def _group_past_lags(pairs: list[tuple[str, int]]) -> PastLags:
+    """Group ``(component, lag)`` pairs per component: components in rank order
+    of first appearance, lags sorted ascending (canonical; darts orders the
+    design columns itself)."""
+    grouped: dict[str, list[int]] = {}
+    for component, lag in pairs:
+        grouped.setdefault(component, []).append(lag)
+    return tuple((component, tuple(sorted(lags))) for component, lags in grouped.items())
 
 
 # --------------------------------------------------------------------------- #
@@ -344,18 +552,26 @@ def select_top_k(
     config: FeatureSelectionConfig,
     *,
     sample_weight=None,
+    protocol: Protocol = "legacy",
 ) -> FeatureSelection:
     """Fit one LightGBM on everything and keep the top-``k`` lagged features.
 
     Args:
         train_target: the training target series (list of ``TimeSeries``).  For
-            the ``diffreg`` family this is the **level** target (Q8).
+            the legacy ``diffreg`` family this is the **level** target (Q8); for
+            ``diff_l2`` the caller passes the differenced one.
         past_covs: full-length past covariates, as returned by
             ``get_covs_and_encodings``.
         future_covs: full-length future covariates.
         config: the per-family kwargs.
-        sample_weight: optional, only the hurdle regressor used it (Q7).
+        sample_weight: optional; the hurdle count-head selectors use it (Q7).
+        protocol: ``"legacy"`` (the thesis: every lagged column competes, the
+            non-stable sort, base-name collapse) or ``"figure"`` (only the
+            ``_pastcov`` lag columns compete, stable sort, exactly ``top_k``
+            ``(feature, lag)`` pairs, every future covariate kept).
     """
+    if protocol not in ("legacy", "figure"):
+        raise ValueError(f"unknown protocol {protocol!r}; expected 'legacy' or 'figure'")
     model = config.build_model()
     fit_kwargs: dict[str, Any] = {
         "series": train_target,
@@ -366,16 +582,46 @@ def select_top_k(
         fit_kwargs["sample_weight"] = sample_weight
     model.fit(**fit_kwargs)
 
-    gain_table = rank_features_by_gain(model)
-    top_features = gain_table.head(config.top_k)["Feature"].to_list()
-    selected = parse_feature_names(top_features)
+    available_past = _components(past_covs)
+    available_future = _components(future_covs)
+    if protocol == "legacy":
+        gain_table = rank_features_by_gain(model)
+        top_features = gain_table.head(config.top_k)["Feature"].to_list()
+        return FeatureSelection(
+            gain_table=gain_table,
+            selected=parse_feature_names(top_features),
+            top_features=top_features,
+            config=config,
+            available_past=available_past,
+            available_future=available_future,
+        )
+
+    gain_table = rank_features_by_gain(model, protocol="figure")
+    if available_past:
+        # Never select a column that is not a component of the input series.
+        gain_table = gain_table.loc[gain_table["component"].isin(set(available_past))]
+        gain_table = gain_table.reset_index(drop=True)
+    if len(gain_table) < config.top_k:
+        logger.warning(
+            "figure selection: only %d past-covariate lag columns for top_k=%d",
+            len(gain_table),
+            config.top_k,
+        )
+    head = gain_table.head(config.top_k)
+    top_features = head["Feature"].to_list()
+    past_lags = _group_past_lags(
+        list(zip(head["component"].to_list(), head["lag"].astype(int).to_list(), strict=True))
+    )
     return FeatureSelection(
         gain_table=gain_table,
-        selected=selected,
+        selected=parse_feature_names(top_features),
         top_features=top_features,
         config=config,
-        available_past=_components(past_covs),
-        available_future=_components(future_covs),
+        available_past=available_past,
+        available_future=available_future,
+        past_lags=past_lags,
+        n_nonzero_gain=int((gain_table["mean_gain"] > 0).sum()),
+        protocol="figure",
     )
 
 
@@ -388,7 +634,7 @@ def _components(covs) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# the three legacy configurations, extracted verbatim
+# the four legacy selectors (three notebook blocks), extracted verbatim
 # --------------------------------------------------------------------------- #
 def legacy_common_kwargs(input_lags: int = 7, output_chunk_len: int = 7) -> dict[str, Any]:
     """Copy of ``src/prevalent_functions.py::get_common_kwargs``.
@@ -498,4 +744,115 @@ def zipoisson_classifier_config():
         objective="binary",
         kind="classifier",
         model_kwargs={**legacy_common_kwargs(), "is_unbalance": True, "random_state": 42},
+    )
+
+
+# --------------------------------------------------------------------------- #
+# the five figure selectors (plan 2026-09-28), one shared skeleton
+# --------------------------------------------------------------------------- #
+def shared_selector_kwargs() -> dict[str, Any]:
+    """The ONE skeleton every figure selector shares: the count/diff one.
+
+    :func:`legacy_common_kwargs` (lags 7, past lags ``[-1, -7, -14]``, future
+    span ``(2, 7)``, 7-step chunk, cyclic encoders) plus the learner settings
+    ``countreg``/``diffreg`` already agreed on. The five branches differ ONLY
+    in objective, target and weights (plan "Decisions"). ``subsample`` is
+    inert without ``subsample_freq`` (kept as the thesis had it; the paper must
+    not claim bagging). No device/thread kwarg: the builders add them.
+    """
+    return {
+        **legacy_common_kwargs(),
+        "multi_models": True,
+        "num_leaves": 31,
+        "max_depth": 5,
+        "min_child_samples": 30,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "learning_rate": 0.05,
+        "n_estimators": 500,
+        "reg_alpha": 0.0,
+        "reg_lambda": 0.0,
+        "random_state": 42,
+        "verbose": -1,
+        "force_col_wise": True,
+    }
+
+
+def _figure_config(
+    objective: str,
+    *,
+    kind: Literal["regressor", "classifier"] = "regressor",
+    extra: dict[str, Any] | None = None,
+    device_type: str = "cpu",
+    num_threads: int | None = None,
+) -> FeatureSelectionConfig:
+    kwargs: dict[str, Any] = {
+        **shared_selector_kwargs(),
+        **(extra or {}),
+        "device_type": device_type,
+    }
+    if num_threads is not None:
+        kwargs["num_threads"] = num_threads
+    return FeatureSelectionConfig(
+        top_k=100, objective=objective, kind=kind, model_kwargs=kwargs  # type: ignore[arg-type]
+    )
+
+
+def diff_l2_config(*, device_type: str = "cpu", num_threads: int | None = None):
+    """``diff_l2``: L2 regression on the DIFFERENCED target (resolves Q8).
+
+    Feeds the diff family's lightgbm/xgboost/catboost/linear. The target is
+    the caller's business (``data_stage`` passes
+    ``model_space_parts(bundle)["target_train"]``).
+    """
+    return _figure_config("regression", device_type=device_type, num_threads=num_threads)
+
+
+def count_poisson_config(*, device_type: str = "cpu", num_threads: int | None = None):
+    """``count_poisson``: Poisson on the level target; feeds the ``*_poisson`` GBDTs.
+
+    The thesis let the Tweedie ``countreg`` selection feed these too; the
+    figure gives them their own matched-objective selector.
+    """
+    return _figure_config("poisson", device_type=device_type, num_threads=num_threads)
+
+
+def count_tweedie_config(*, device_type: str = "cpu", num_threads: int | None = None):
+    """``count_tweedie``: Tweedie (p=1.5) on the level target; feeds the
+    ``*_tweedie`` GBDTs (and, as the family default, the count RNNs)."""
+    return _figure_config(
+        "tweedie",
+        extra={"tweedie_variance_power": 1.5},
+        device_type=device_type,
+        num_threads=num_threads,
+    )
+
+
+def hurdle_binary_config(*, device_type: str = "cpu", num_threads: int | None = None):
+    """``hurdle_binary``: binary, ``is_unbalance=True``, on ``<T>_binary``.
+
+    Feeds the hurdle's SPE event classifier. Unlike ``zipoisson_classifier``
+    it uses the shared skeleton, not LightGBM's library defaults.
+    """
+    return _figure_config(
+        "binary",
+        kind="classifier",
+        extra={"is_unbalance": True},
+        device_type=device_type,
+        num_threads=num_threads,
+    )
+
+
+def hurdle_tweedie_pos_config(*, device_type: str = "cpu", num_threads: int | None = None):
+    """``hurdle_tweedie_pos``: Tweedie (p=1.5) on the level target, fitted with
+    POSITIVE-ONLY sample weights (the data stage supplies them, Q7).
+
+    Matches the CatBoost Tweedie count head it feeds; the thesis selected for
+    that head with a Poisson objective (``zipoisson_regressor``).
+    """
+    return _figure_config(
+        "tweedie",
+        extra={"tweedie_variance_power": 1.5},
+        device_type=device_type,
+        num_threads=num_threads,
     )

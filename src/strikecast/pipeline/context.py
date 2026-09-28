@@ -111,14 +111,53 @@ def get_spec(name: str, experiment: str | None = None) -> ModelSpec:
 
 
 def make_run_context(
-    cfg: ExperimentConfig, model_name: str, seed: int | None = None
+    cfg: ExperimentConfig,
+    model_name: str,
+    seed: int | None = None,
+    data: Any = None,
 ) -> RunContext:
     """The :class:`RunContext` a builder takes for one model under one seed.
 
     Thin wrapper over :meth:`ExperimentConfig.to_run_context` so that stages
     never reach into the config for the device policy themselves (§1, F9).
+
+    ``data`` carries the figure-protocol feature space into the context (plan
+    "figure feature selection" §4 and its amendments): a plain
+    :class:`~strikecast.pipeline.data_stage.DataArtifacts` sets ``past_lags``
+    from ``data.features.past_lags``; a ``CompositeData`` (it has ``.heads``)
+    also sets ``head_past_lags`` -- one entry per head, in head order -- so the
+    hurdle builder can narrow the context with ``ctx.for_head(name)``, and
+    ``past_lags`` is the primary head's. ``None`` everywhere (no ``data``, a
+    legacy selection, Chronos' frame without a ``features`` block) leaves the
+    legacy all-lags skeleton untouched.
     """
-    return cfg.to_run_context(model_name, seed)
+    ctx = cfg.to_run_context(model_name, seed)
+    if data is None:
+        return ctx
+    changes: dict[str, Any] = {}
+    past_lags = _past_lags_of(data)
+    if past_lags is not None:
+        changes["past_lags"] = past_lags
+    heads = getattr(data, "heads", None)
+    if heads:
+        head_lags = tuple((str(name), _past_lags_of(art)) for name, art in heads.items())
+        if any(lags is not None for _, lags in head_lags):
+            changes["head_past_lags"] = head_lags
+    if not changes:
+        return ctx
+    import dataclasses  # noqa: PLC0415
+
+    return dataclasses.replace(ctx, **changes)
+
+
+def _past_lags_of(data: Any) -> Any:
+    """``data.features.past_lags``, or ``None`` where there is none.
+
+    ``getattr`` throughout: Chronos' ``ChronosData`` has no selection, and a
+    ``FeatureSets`` built before the figure protocol has no ``past_lags``.
+    """
+    features = getattr(data, "features", None)
+    return getattr(features, "past_lags", None) if features is not None else None
 
 
 def resolve_store_root(cfg: ExperimentConfig, override: str | Path | None = None) -> Path:

@@ -441,6 +441,8 @@ def _fake_gbdt_setup(monkeypatch, data, family="lightgbm"):
     art = SimpleNamespace(
         bundle=bundle, region_names=names, activity_by_region={"r_a": 1, "r_b": 2, "r_c": 1},
         upstream=("p", "s", "f"),
+        # resolve_params checks the tuned selection against this (plan §7)
+        features=SimpleNamespace(hash="f", source="test", past_lags=None),
     )
     return art
 

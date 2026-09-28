@@ -48,7 +48,6 @@ import numpy as np
 from strikecast.backtest.engine import ExpandingWindowBacktest
 from strikecast.backtest.hooks import PruningHook
 from strikecast.backtest.predictions import PredictionSet
-from strikecast.pipeline import data_stage as _data_stage
 from strikecast.pipeline.context import (
     get_spec,
     make_run_context,
@@ -58,11 +57,15 @@ from strikecast.pipeline.context import (
     tracker_tags,
 )
 from strikecast.pipeline.run_stage import (
+    TunedParamsStale,
     _covariates,
     _metric_set,
     _naive_scales,
     make_forecaster,
     model_targets_for,
+    plan_selections,
+    recorded_features_hash,
+    selection_protocol,
     stage_targets,
 )
 from strikecast.seeds import seed_everything
@@ -74,7 +77,15 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from strikecast.config.schema import ExperimentConfig
     from strikecast.pipeline.data_stage import DataArtifacts
 
-__all__ = ["TuneOutcome", "trial_callback", "trial_protocol", "tune_experiment", "tune_model"]
+__all__ = [
+    "STUDY_PROVENANCE",
+    "TuneOutcome",
+    "TunedParamsStale",
+    "trial_callback",
+    "trial_protocol",
+    "tune_experiment",
+    "tune_model",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +94,10 @@ TUNING_STAGE = "cv"
 
 #: The paradigm every legacy study tuned under (§1 "Seeds", F14).
 TUNING_PARADIGM = "global"
+
+#: Written into ``tuning/<model>/`` BEFORE a study starts, so an interrupted
+#: study (SQLite, no ``best_params.json``) still names the selection it ran on.
+STUDY_PROVENANCE = "study_provenance.json"
 
 
 @dataclass(frozen=True)
@@ -265,6 +280,21 @@ def tune_model(
         logger.info("%s has no search space; nothing to tune", model_name)
         return TuneOutcome(model_name, dict(spec.defaults), None, 0, True, "not tunable")
 
+    # Plan "figure feature selection" §7: neither best_params.json nor the
+    # Optuna study is keyed on the selection. Refuse to reuse or resume one
+    # tuned on another selection; --force archives it and starts fresh.
+    stale = _stale_study(cfg, directory, data.features.hash)
+    if stale is not None:
+        if not force:
+            raise TunedParamsStale(
+                f"{directory} holds a study tuned on feature selection {stale[0] or '<none>'} "
+                f"({stale[1]}), but the current selection is {data.features.hash}. Resuming "
+                "it would mix trials of two feature spaces. Re-run with --force to archive "
+                f"it as {directory.name}.stale-<hash> (nothing is deleted) and tune afresh."
+            )
+        archived = _archive_study(directory, stale[0])
+        logger.warning("%s: stale study archived as %s", model_name, archived)
+
     if best_path.is_file() and not force:
         from strikecast.tuning import load_best_params  # noqa: PLC0415
 
@@ -296,7 +326,7 @@ def tune_model(
         # process would: the legacy scripts seed once at import and build one
         # model per trial. The sampler's own state lives in the study.
         seed_everything(int(cfg.seeds.tuning_seed))
-        ctx = make_run_context(cfg, model_name, int(cfg.seeds.tuning_seed))
+        ctx = make_run_context(cfg, model_name, int(cfg.seeds.tuning_seed), data)
         preset, per_fold_pruning = trial_protocol(spec)
         forecaster = make_forecaster(cfg, spec, model_name, dict(params), ctx, preset=preset)
         if not per_fold_pruning:
@@ -320,6 +350,7 @@ def tune_model(
 
     from strikecast.tuning import tune as _tune  # noqa: PLC0415
 
+    _write_study_provenance(directory, cfg, data)
     try:
         track(
             tracker,
@@ -363,6 +394,76 @@ def tune_model(
     )
 
 
+def _feature_provenance(cfg: ExperimentConfig, data: DataArtifacts) -> dict[str, Any]:
+    """The features a study runs on: ``expdecay``, window, upstream hashes."""
+    return {
+        "expdecay": cfg.series.window.expdecay,
+        "window": cfg.series.window.model_dump(mode="json"),
+        "panel_hash": data.panel_hash,
+        "series_hash": data.series_hash,
+        "features_hash": data.features.hash,
+        "features_source": data.features.source,
+    }
+
+
+def _stale_study(
+    cfg: ExperimentConfig, directory: Path, features_hash: str
+) -> tuple[str | None, str] | None:
+    """``(recorded hash, where)`` when ``directory`` belongs to another selection.
+
+    Checked, in order: ``best_params.json``'s ``provenance.features_hash``;
+    ``study_provenance.json`` (catches an interrupted study whose SQLite
+    exists but which wrote no ``best_params.json``); and, under the figure
+    protocol, a ``best_params.json`` with no recorded hash at all -- the
+    imported thesis params, tuned on the thesis selection. ``None`` when the
+    directory is absent, fresh, or matches.
+    """
+    import json  # noqa: PLC0415
+
+    best = directory / "best_params.json"
+    if best.is_file():
+        recorded = recorded_features_hash(directory)
+        if recorded is not None and recorded != features_hash:
+            return recorded, "best_params.json"
+        if recorded is None and selection_protocol(cfg) != "legacy":
+            return None, "best_params.json without a features_hash: imported thesis params"
+    marker = directory / STUDY_PROVENANCE
+    if marker.is_file():
+        try:
+            recorded = json.loads(marker.read_text(encoding="utf-8")).get("features_hash")
+        except (OSError, ValueError, AttributeError):
+            recorded = None
+        if recorded and recorded != features_hash:
+            return str(recorded), STUDY_PROVENANCE
+    return None
+
+
+def _archive_study(directory: Path, old_hash: str | None) -> Path:
+    """Rename ``tuning/<model>`` to ``tuning/<model>.stale-<hash[:8]>`` (never delete).
+
+    A numeric suffix keeps an earlier archive of the same hash intact.
+    """
+    base = f"{directory.name}.stale-{(old_hash or 'unknown')[:8]}"
+    target = directory.with_name(base)
+    n = 1
+    while target.exists():
+        target = directory.with_name(f"{base}.{n}")
+        n += 1
+    directory.rename(target)
+    return target
+
+
+def _write_study_provenance(directory: Path, cfg: ExperimentConfig, data: DataArtifacts) -> None:
+    """``tuning/<model>/study_provenance.json``, written before the first trial."""
+    import json  # noqa: PLC0415
+
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / STUDY_PROVENANCE
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(_feature_provenance(cfg, data), indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
 def _record_feature_provenance(path: Path, cfg: ExperimentConfig, data: DataArtifacts) -> None:
     """Add the features a study was tuned on to its ``best_params.json``.
 
@@ -378,14 +479,7 @@ def _record_feature_provenance(path: Path, cfg: ExperimentConfig, data: DataArti
     if not path.is_file():
         return
     payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["provenance"] = {
-        "expdecay": cfg.series.window.expdecay,
-        "window": cfg.series.window.model_dump(mode="json"),
-        "panel_hash": data.panel_hash,
-        "series_hash": data.series_hash,
-        "features_hash": data.features.hash,
-        "features_source": data.features.source,
-    }
+    payload["provenance"] = _feature_provenance(cfg, data)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp.replace(path)
@@ -417,12 +511,16 @@ def tune_experiment(
     n_trials: int | None = None,
     force: bool = False,
 ) -> list[TuneOutcome]:
-    """Tune every (tunable) model of an experiment, once."""
+    """Tune every (tunable) model of an experiment, once.
+
+    Per selection group, like :func:`strikecast.pipeline.run_stage.run_experiment`:
+    each model is tuned on the data of ITS selection, under the narrowed config.
+    An explicit ``data`` is accepted only when all requested models share one
+    selection (:func:`~strikecast.pipeline.run_stage.plan_selections`).
+    """
     store = store if store is not None else RunStore(resolve_store_root(cfg))
-    if data is None:
-        data = _data_stage.prepare_data(cfg, store)
-    names = list(models) if models else cfg.model_names
     return [
-        tune_model(cfg, name, data, store=store, n_trials=n_trials, force=force)
+        tune_model(group_cfg, name, group_data, store=store, n_trials=n_trials, force=force)
+        for group_cfg, group_data, names in plan_selections(cfg, store, data=data, models=models)
         for name in names
     ]

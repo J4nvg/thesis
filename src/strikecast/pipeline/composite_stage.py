@@ -761,7 +761,9 @@ def run_composite_stage(
     tracker = tracker if tracker is not None else make_tracker(cfg)
 
     seed_everything(int(seed))
-    ctx = make_run_context(cfg, model_name, int(seed))
+    # `head_past_lags` (one entry per head) reaches `_build_hurdle` through the
+    # context; damage heads are legacy selections, so theirs are None.
+    ctx = make_run_context(cfg, model_name, int(seed), data)
 
     store.start_stage(key, stage_name, digest)
     store.write_config(key, cfg.model_dump(mode="json"))

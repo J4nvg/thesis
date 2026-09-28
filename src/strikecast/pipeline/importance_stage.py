@@ -202,9 +202,21 @@ def run_importance(
         # identity follows that stage's.
         upstream = [*data.upstream, getattr(test_state, "stage_hash", None) or ""]
     elif spec.kind == "global" and spec.family in GBDT_FAMILIES:
-        from strikecast.pipeline.run_stage import resolve_params  # noqa: PLC0415
+        from strikecast.pipeline.run_stage import (  # noqa: PLC0415
+            TunedParamsStale,
+            resolve_params,
+        )
 
-        params, params_source = resolve_params(cfg, spec, model_name, store)
+        try:
+            # The importance explains the TUNED model on ITS selection (plan
+            # "figure feature selection" §7): a study tuned on another
+            # selection is refused, exactly as in run_stage.
+            params, params_source = resolve_params(
+                cfg, spec, model_name, store, features_hash=data.features.hash
+            )
+        except TunedParamsStale as exc:
+            store.fail_stage(key, IMPORTANCE_STAGE, f"{type(exc).__name__}: {exc}")
+            raise
         resolved = {
             "family": spec.family,
             "params": params,
@@ -308,7 +320,7 @@ def _gbdt(
     past = list(bundle.past_covs)
     future = list(bundle.future_covs)
     groups = partition(data.region_names, paradigm, data.activity_by_region)  # type: ignore[arg-type]
-    ctx = make_run_context(cfg, model_name, seed)
+    ctx = make_run_context(cfg, model_name, seed, data)
 
     frames: list[pd.DataFrame] = []
     labels: list[str] = []

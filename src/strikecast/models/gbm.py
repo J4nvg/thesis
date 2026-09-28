@@ -44,6 +44,10 @@ thread keyword.  Where it was commented out, the keyword is never emitted and
 the library default applies, exactly as before.  ``ctx.threads is None`` also
 suppresses the keyword, which is what reproduces the GPU default branch.
 
+The darts skeleton is :func:`~strikecast.models.spec.darts_common_kwargs`:
+``legacy_common_kwargs()`` bit-for-bit when ``ctx.past_lags is None``, the
+selected per-component past lags otherwise (figure protocol).
+
 ``defaults`` are the untuned parameters of the legacy ``build_regressor``
 branch (minus the shared ``COMMON_KWARGS_TAB``, the device literal, the seed
 and the fixed objective/verbosity kwargs).  ``build(spec.defaults, ctx)``
@@ -79,9 +83,8 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
 
-from strikecast.data.feature_selection import legacy_common_kwargs
 
-from .spec import ModelSpec, RunContext, register
+from .spec import ModelSpec, RunContext, darts_common_kwargs, register
 
 __all__ = [
     "COUNT_GBM_VARIANTS",
@@ -139,7 +142,7 @@ def _build_lightgbm(
         extra["tweedie_variance_power"] = p.pop("tweedie_variance_power")
     head: dict[str, Any] = {"multi_models": True} if multi_models else {}
     return LightGBMModel(
-        **legacy_common_kwargs(),
+        **darts_common_kwargs(ctx),
         **head,
         random_state=ctx.seed,
         verbose=-1,
@@ -211,7 +214,7 @@ def _build_xgboost(
         extra["tweedie_variance_power"] = p.pop("tweedie_variance_power")
     head: dict[str, Any] = {"multi_models": True} if multi_models else {}
     return XGBModel(
-        **legacy_common_kwargs(),
+        **darts_common_kwargs(ctx),
         **head,
         tree_method="hist",
         device=ctx.device,
@@ -248,7 +251,7 @@ def _build_catboost(
         loss = loss_function
     head: dict[str, Any] = {"multi_models": True} if multi_models else {}
     return CatBoostModel(
-        **legacy_common_kwargs(),
+        **darts_common_kwargs(ctx),
         **head,
         loss_function=loss,
         boost_from_average=False,

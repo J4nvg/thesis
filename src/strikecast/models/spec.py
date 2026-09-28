@@ -34,22 +34,39 @@ Rules, mirroring ``docs/REFACTOR_PLAN.md`` §5.2 and §5.4:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 __all__ = [
     "ModelKind",
     "ModelSpec",
+    "PastLags",
     "RunContext",
     "all_specs",
+    "darts_common_kwargs",
     "get_spec",
+    "past_lags_from_mapping",
     "register",
     "registered_experiments",
     "registered_names",
 ]
 
 ModelKind = Literal["global", "local", "naive", "composite"]
+
+#: The exact past-covariate lags a tabular model receives, as
+#: ``((component, (lag, ...)), ...)`` in the selector's rank order. Tuples, not
+#: a dict, so :class:`RunContext` stays frozen and hashable. ``None`` wherever
+#: it is accepted means the legacy rule: every kept component at all of
+#: ``[-1, -7, -14]``.
+PastLags = tuple[tuple[str, tuple[int, ...]], ...]
+
+
+def past_lags_from_mapping(mapping: Mapping[str, Sequence[int]]) -> PastLags:
+    """``{component: [lags]}`` (the selection JSON's ``past_lags``) ->
+    :data:`PastLags`, keeping the mapping's order and coercing every lag to a
+    plain ``int`` (the JSON / numpy round trip can hand back ``np.int64``)."""
+    return tuple((str(comp), tuple(int(lag) for lag in lags)) for comp, lags in mapping.items())
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,11 +78,57 @@ class RunContext:
     which keyword it maps to. ``threads`` is ``available_threads`` where the
     legacy builder used it (``None`` where it was commented out, so the
     library default applies, exactly as before).
+
+    ``past_lags`` is the figure-protocol feature space of a single-model run:
+    the selected ``(feature, lag)`` pairs, which :func:`darts_common_kwargs`
+    turns into darts per-component ``lags_past_covariates``. ``None`` keeps
+    the legacy all-lags skeleton bit-for-bit (``legacy=<family>``, damage,
+    and every model that takes no past covariates). ``head_past_lags`` carries
+    one entry per head of a composite (hurdle: ``"classifier"`` /
+    ``"regressor"``), because each head has its own selector; the composite
+    builder narrows the context with :meth:`for_head` before building a head.
     """
 
     seed: int = 42
     device: str = "cpu"
     threads: int | None = None
+    past_lags: PastLags | None = None
+    head_past_lags: tuple[tuple[str, PastLags | None], ...] = ()
+
+    def for_head(self, name: str) -> RunContext:
+        """This context for composite head ``name``: ``past_lags`` becomes that
+        head's entry (``None`` = legacy all-lags if the head has none) and
+        ``head_past_lags`` is cleared, so a head never sees a sibling's lags."""
+        lags = dict(self.head_past_lags).get(name)
+        return replace(self, past_lags=lags, head_past_lags=())
+
+
+def darts_common_kwargs(ctx: RunContext) -> dict[str, Any]:
+    """The darts skeleton shared by every tabular builder, for ``ctx``.
+
+    ``legacy_common_kwargs()`` (``lags=7``, ``lags_past_covariates=[-1, -7,
+    -14]``, ``lags_future_covariates=(2, 7)``, ``output_chunk_length=7``, the
+    cyclic encoders) unchanged when ``ctx.past_lags is None``, so every legacy
+    build stays bit-identical. Otherwise ``lags_past_covariates`` becomes the
+    per-component dict ``{component: sorted lags}`` of the selected pairs.
+
+    The values are plain ``list[int]`` on purpose: darts 0.43
+    (``SKLearnModel._generate_lags``) accepts only an ``int`` (read as "the
+    last n steps") or a ``list`` of Python ints for a past component, so a
+    tuple or an ``np.int64`` lag is refused. The keys must equal the past components the model is
+    fitted on exactly (darts raises on a missing or an extra key); the data
+    stage subsets the past covariates to ``past_keep`` = the keys of
+    ``past_lags``, which guarantees it. Future covariates keep the legacy
+    ``(2, 7)`` window for every component.
+    """
+    from strikecast.data.feature_selection import legacy_common_kwargs
+
+    kwargs = legacy_common_kwargs()
+    if ctx.past_lags is not None:
+        kwargs["lags_past_covariates"] = {
+            comp: sorted(int(lag) for lag in lags) for comp, lags in ctx.past_lags
+        }
+    return kwargs
 
 
 def _identity_params(best: Mapping[str, Any]) -> dict[str, Any]:
