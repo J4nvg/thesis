@@ -606,3 +606,39 @@ def test_finished_verification_groups_are_not_resubmitted(monkeypatch, tmp_path)
         {"count": ["cpu", "gpu"], "diff": ["cpu"]}, tmp_path
     )
     assert pending == {"count": ["gpu"], "diff": ["cpu"]}
+
+
+# --------------------------------------------------------------------------- #
+# --top / --runs: a seed sweep over a subset of runs
+# --------------------------------------------------------------------------- #
+def test_top_reads_the_master_leaderboard_as_store_run_keys(tmp_path: Path) -> None:
+    board = tmp_path / "master_leaderboard.csv"
+    board.write_text(
+        "Modelname,paradigm,model,SkillScore,mae,rmse\n"
+        "chronos2,local,chronos2_fine_tuned,0.17,0.71,1.83\n"
+        "gbdt,global,xgboost_tweedie,0.16,0.78,1.84\n"
+        "lstm,activity,gru_tweedie_w14,0.15,0.77,1.85\n"
+        "diff,global,arima,0.15,0.81,1.85\n"
+        "finalhurdle,global,hurdle,0.09,0.80,2.01\n",
+        encoding="utf-8",
+    )
+    assert submit_all.leaderboard_runs(board, 4) == {
+        ("chronos2", "chronos2_fine_tuned", "global"),
+        ("count", "xgboost_tweedie", "global"),
+        ("count", "gru_tweedie_w14", "activity"),
+        ("diff", "arima", "global"),
+    }
+    with pytest.raises(SystemExit):
+        submit_all.leaderboard_runs(tmp_path / "missing.csv", 20)
+
+
+def test_runs_option_parses_and_restricts_experiments() -> None:
+    assert submit_all.parse_runs("hurdle:hurdle:global,count:lstm_w7:global") == {
+        ("hurdle", "hurdle", "global"), ("count", "lstm_w7", "global"),
+    }
+    with pytest.raises(SystemExit):
+        submit_all.parse_runs("hurdle:global")
+    args = submit_all._parser().parse_args(["--runs", "hurdle:hurdle:global", "--seeds", "1,2"])
+    opts = submit_all.options_from(args)
+    assert opts.experiments == ["hurdle"]
+    assert opts.runs == {("hurdle", "hurdle", "global")}

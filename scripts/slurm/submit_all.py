@@ -220,6 +220,8 @@ class Options:
     experiments: list[str] = field(default_factory=lambda: list(DEFAULT_EXPERIMENTS))
     stages: list[str] = field(default_factory=lambda: list(ALL_STAGES))
     models: list[str] | None = None
+    #: only these (experiment, model, paradigm) runs (``--runs`` / ``--top``); None = all
+    runs: set[tuple[str, str, str]] | None = None
     cv: str = "needed"
     store_root: str = DEFAULT_STORE
     verify_store_root: str = VERIFY_STORE
@@ -489,6 +491,39 @@ def _unique(items: list[str]) -> list[str]:
     return out
 
 
+def leaderboard_runs(path: Path, top: int) -> set[tuple[str, str, str]]:
+    """The first ``top`` rows of ``strikecast figures``' ``master_leaderboard.csv``
+    (seed 42, SkillScore order) as run-store ``(experiment, model, paradigm)`` keys.
+
+    The leaderboard uses the thesis' display families and paradigms; this undoes
+    them (``gbdt``/``lstm`` -> count, ``finalhurdle`` -> hurdle, Chronos-2 is shown
+    as ``local`` but runs under ``global``), as ``reporting.sources.StoreSource`` does.
+    """
+    if not path.is_file():
+        raise SystemExit(f"--top needs {path}; run the figures stage first")
+    with path.open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))[:top]
+    runs = set()
+    for row in rows:
+        family, paradigm, model = row["Modelname"], row["paradigm"], row["model"]
+        experiment = {"gbdt": "count", "lstm": "count", "finalhurdle": "hurdle"}.get(family, family)
+        if experiment == "chronos2":
+            paradigm = "global"
+        runs.add((experiment, model, paradigm))
+    return runs
+
+
+def parse_runs(spec: str) -> set[tuple[str, str, str]]:
+    """``count:xgboost_tweedie:global,hurdle:hurdle:global`` -> run keys."""
+    runs = set()
+    for item in (s for s in spec.split(",") if s):
+        parts = item.split(":")
+        if len(parts) != 3:
+            raise SystemExit(f"--runs entry {item!r} is not experiment:model:paradigm")
+        runs.add((parts[0], parts[1], parts[2]))
+    return runs
+
+
 def _report_seeds(seeds: list[int]) -> str:
     """42 first (the leaderboard seed of §7), then the others of this submission."""
     ordered = [42] + [s for s in seeds if s != 42]
@@ -709,6 +744,8 @@ def build_matrices(opts: Options) -> tuple[dict[str, list[Any]], dict[str, Any]]
     for exp in opts.experiments:
         cfg = load_experiment(exp, overrides)
         models = [m for m in cfg.model_names if not opts.models or m in opts.models]
+        if opts.runs is not None:
+            models = [m for m in models if any(r[:2] == (exp, m) for r in opts.runs)]
         jobs = make_jobs.build_jobs(
             cfg,
             models=models,
@@ -721,6 +758,8 @@ def build_matrices(opts: Options) -> tuple[dict[str, list[Any]], dict[str, Any]]
             get_spec=get_spec,
             cv=opts.cv,
         )
+        if opts.runs is not None:
+            jobs = [j for j in jobs if j.stage == "tune" or (exp, j.model, j.paradigm) in opts.runs]
         # A deterministic model runs once, under the canonical seed (§5.4); a
         # later `--seeds 1,2` submission must not re-run it under seed 1.
         canonical = int(cfg.seeds.eval_seeds[0]) if cfg.seeds.eval_seeds else 42
@@ -1196,6 +1235,11 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--stages", default=",".join(ALL_STAGES),
                    help=f"subset of {','.join(ALL_STAGES)}")
     p.add_argument("--models", default=None, help="only these registry names")
+    p.add_argument("--top", type=int, default=None,
+                   help="only the top-N runs of <store>/_figures/master_leaderboard.csv "
+                        "(e.g. a seed sweep of the top 20)")
+    p.add_argument("--runs", default=None,
+                   help="only these runs, experiment:model:paradigm[,...]; added to --top")
     p.add_argument("--cv", choices=("needed", "all"), default="needed",
                    help="cv stage only where a later stage needs it (hurdle) or for every model")
     p.add_argument("--store-root", default=None,
@@ -1246,13 +1290,24 @@ def options_from(args: argparse.Namespace) -> Options:
         stages = [s for s in stages if s != "verify"]
     if args.benchmark:
         stages = [s for s in stages if s in ("setup", "featsel", "tune", "cv", "test")]
+    store_root = args.store_root or (BENCHMARK_STORE if args.benchmark else DEFAULT_STORE)
+    runs = None
+    if args.top is not None or args.runs:
+        runs = parse_runs(args.runs or "")
+        if args.top is not None:
+            runs |= leaderboard_runs(REPO / store_root / "_figures" / "master_leaderboard.csv",
+                                     args.top)
+    experiments = [e for e in args.experiments.split(",") if e]
+    if runs is not None:
+        experiments = [e for e in experiments if any(r[0] == e for r in runs)]
     return Options(
         seeds=[int(s) for s in args.seeds.split(",") if s],
-        experiments=[e for e in args.experiments.split(",") if e],
+        experiments=experiments,
         stages=stages,
         models=[m for m in args.models.split(",") if m] if args.models else None,
+        runs=runs,
         cv=args.cv,
-        store_root=args.store_root or (BENCHMARK_STORE if args.benchmark else DEFAULT_STORE),
+        store_root=store_root,
         verify_store_root=args.verify_store_root,
         tracking=args.tracking or ("noop" if args.benchmark else None),
         tracking_overrides=_tracking_overrides(args),
