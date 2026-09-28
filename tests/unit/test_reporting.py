@@ -17,7 +17,7 @@ import pytest
 
 from strikecast.reporting import compute as C
 from strikecast.reporting import plots as P
-from strikecast.reporting.build import _fmt_param, _macro_name, build_all
+from strikecast.reporting.build import _fmt_param, _macro_name, _native_model, build_all
 from strikecast.reporting.sources import LegacySource, MissingInput, StoreSource
 
 REPO = Path(__file__).resolve().parents[2]
@@ -431,6 +431,17 @@ def test_names_and_formats() -> None:
     assert _fmt_param("subsample", 0.9977756396798295) == "0.998"
     assert _fmt_param("lr", 0.0010814406628766157) == r"$1.081 \times 10^{-3}$"
     assert _fmt_param("hidden_fc_sizes", "64") == "$[64]$"
+
+
+def test_native_model_keeps_chronos_fine_tuned_store_name() -> None:
+    """The store runs Chronos-2 as ``chronos2_fine_tuned``; stripping ``_tuned`` there
+    dropped the Chronos-2-FT row of Table 4 in the first publication run."""
+    store = type("S", (), {"name": "store"})()
+    legacy = type("L", (), {"name": "legacy"})()
+    assert _native_model(store, "chronos2_fine_tuned") == "chronos2_fine_tuned"
+    assert _native_model(store, "catboost_tweedie_tuned") == "catboost_tweedie"
+    assert _native_model(store, "finalhurdle") == "hurdle"
+    assert _native_model(legacy, "chronos2_fine_tuned") == "chronos2_fine_tuned"
 
 
 def test_horizon_statistics_routing() -> None:

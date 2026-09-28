@@ -204,9 +204,17 @@ def _table4_predictions(ctx: BuildContext) -> tuple[dict[str, pd.DataFrame], lis
     return preds, missing
 
 
+#: Store model names that genuinely end in ``_tuned`` (not the legacy "was tuned" suffix).
+_STORE_NAMES_ENDING_TUNED = frozenset({"chronos2_fine_tuned"})
+
+
 def _native_model(source: ResultsSource, legacy_model: str) -> str:
     if source.name == "store":
-        return "hurdle" if legacy_model == "finalhurdle" else legacy_model.removesuffix("_tuned")
+        if legacy_model == "finalhurdle":
+            return "hurdle"
+        if legacy_model in _STORE_NAMES_ENDING_TUNED:
+            return legacy_model
+        return legacy_model.removesuffix("_tuned")
     return legacy_model
 
 
