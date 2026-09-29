@@ -491,45 +491,163 @@ def build_top20_boxplot(ctx: BuildContext) -> list[Path]:
         return [ctx.figure("top20_rmse_horizon.svg", P.top20_horizon_boxplot(per, "RMSE"), tight=False)]
 
 
-def _activity_importancedict(ctx: BuildContext) -> dict[str, dict[str, pd.DataFrame]]:
+# --------------------------------------------------------------------------- #
+# feature importance (F20, F21, F23): the two leading models of the leaderboard
+# --------------------------------------------------------------------------- #
+#: The tabular pool of the importance figures (Jan, 2026-09-29): the count GBDTs
+#: under the Global or Activity paradigm. Local (20 regional models) is left
+#: out: its importance is costly to compute and has no single summary.
+FI_GBDT_FAMILIES: tuple[str, ...] = ("lightgbm", "xgboost", "catboost")
+FI_GBDT_PARADIGMS: tuple[str, ...] = ("global", "activity")
+_FI_TIERS: tuple[int, ...] = (1, 2, 3)
+_FI_FOOTNOTE = ("Chronos-2: permutation importance of its covariates only; its own strike "
+                "history is the model's context window and is not ranked.")
+
+
+@dataclass(frozen=True)
+class FIModel:
+    """One model of the importance figures, as it appears in the master leaderboard."""
+
+    family: str  # leaderboard ``Modelname`` (``gbdt`` / ``chronos2``)
+    paradigm: str  # leaderboard paradigm (Chronos-2 rows say ``local``)
+    model: str  # store name, without the legacy ``_tuned`` suffix
+    rank: int  # 1-based master-leaderboard rank
+
+    @property
+    def key(self) -> str:
+        return C.model_key({"model": self.model, "paradigm": self.paradigm})
+
+    @property
+    def title(self) -> str:
+        name = C.pretty_model(self.model)
+        return name if self.family == "chronos2" else f"{name}, {self.paradigm.capitalize()}"
+
+
+def _plain_model(model: str) -> str:
+    return model if model in _STORE_NAMES_ENDING_TUNED else model.removesuffix("_tuned")
+
+
+def _fi_models(ctx: BuildContext) -> tuple[FIModel, FIModel]:
+    """The best count GBDT (Global/Activity) and the best Chronos-2 variant, by SkillScore."""
+    master = ctx.master.reset_index(drop=True)
+    plain = master["model"].map(_plain_model)
+    gbdt = master[(master["Modelname"] == "gbdt") & master["paradigm"].isin(FI_GBDT_PARADIGMS)
+                  & plain.str.split("_").str[0].isin(FI_GBDT_FAMILIES)]
+    chronos = master[(master["Modelname"] == "chronos2") & plain.str.startswith("chronos2")]
+    if gbdt.empty:
+        raise MissingInput("no Global/Activity count GBDT in the master leaderboard")
+    if chronos.empty:
+        raise MissingInput("no Chronos-2 row in the master leaderboard")
+    picked = []
+    for rows in (gbdt, chronos):
+        i = int(rows.index[0])
+        r = master.loc[i]
+        picked.append(FIModel(str(r["Modelname"]), str(r["paradigm"]), plain[i], i + 1))
+    g, c = picked
+    ctx.notes.append(f"models: {g.key} (rank {g.rank}), {c.key} (rank {c.rank})")
+    return g, c
+
+
+def _missing_importance(ctx: BuildContext, experiment: str, model: str, paradigm: str,
+                        what: str) -> MissingInput:
+    msg = f"no feature importance for {what}"
+    if ctx.source.name == "store":
+        seed = getattr(ctx.source, "seed", 42)
+        root = getattr(ctx.source, "root", "<store-root>")
+        msg += (f"; compute it as a cluster job: `strikecast importance experiment={experiment} "
+                f"model={model} paradigm={paradigm} seed={seed} --store-root {root}` "
+                f"(or add it to strikecast.pipeline.importance_stage.DEFAULT_JOBS so "
+                f"`submit_all.py --stages importance` schedules it)")
+    return MissingInput(msg)
+
+
+def _gbdt_importancedict(ctx: BuildContext, g: FIModel) -> dict[str, dict[str, pd.DataFrame]]:
+    """``{group: {metric: top features}}`` of the chosen GBDT: one group per tier for an
+    Activity model (``activity_<k>``), a single ``global`` group otherwise."""
     from strikecast.evaluation.importance import top_features  # noqa: PLC0415
 
-    imp = ctx.source.gbdt_importance()
-    out = {}
-    for tier in (1, 2, 3):
-        sub = imp[imp["model"] == f"activity_{tier}_catboost_tweedie"]
+    groups = ([(f"activity_{t}", f"activity_{t}_{g.model}") for t in _FI_TIERS]
+              if g.paradigm == "activity" else [("global", f"global_{g.model}")])
+    try:
+        imp = ctx.source.gbdt_importance()
+    except MissingInput as exc:
+        raise _missing_importance(ctx, "count", g.model, g.paradigm, g.key) from exc
+    out: dict[str, dict[str, pd.DataFrame]] = {}
+    for group, label in groups:
+        sub = imp[imp["model"] == label]
         if sub.empty:
-            raise MissingInput(f"importance has no activity_{tier}_catboost_tweedie rows")
-        out[f"activity_{tier}"] = {"gain": top_features(sub, "agg_gain"),
-                                   "perm": top_features(sub, "agg_perm")}
+            raise _missing_importance(ctx, "count", g.model, g.paradigm, label)
+        out[group] = {m: top_features(sub, f"agg_{m}") for m in ("gain", "perm")
+                      if f"agg_{m}" in sub and not sub[f"agg_{m}"].isna().all()}
     return out
 
 
-def build_importance_share(ctx: BuildContext) -> list[Path]:
-    from strikecast.evaluation.importance import category_importance_matrix  # noqa: PLC0415
+def _chronos_importance(ctx: BuildContext, c: FIModel) -> pd.DataFrame:
+    try:
+        return ctx.source.chronos_importance(c.model)
+    except MissingInput as exc:
+        raise _missing_importance(ctx, "chronos2", c.model, "global", c.key) from exc
 
-    mat = category_importance_matrix(_activity_importancedict(ctx))
+
+def build_importance_share(ctx: BuildContext) -> list[Path]:
+    """F20: category shares of the best GBDT (per tier if Activity) and the best Chronos-2."""
+    from strikecast.evaluation.importance import (  # noqa: PLC0415
+        CATEGORY_ORDER,
+        category_importance_matrix,
+        category_shares,
+        top_features,
+    )
+
+    g, c = _fi_models(ctx)
+    gbdt = category_importance_matrix(_gbdt_importancedict(ctx, g))
+    chronos = category_shares(top_features(_chronos_importance(ctx, c), "importance"))
+    facets, cols = [], {}
+    for group in (f"Tier {t}" for t in _FI_TIERS) if g.paradigm == "activity" else ["global"]:
+        metrics = [str(col).removeprefix(f"{group} ") for col in gbdt.columns
+                   if str(col).startswith(f"{group} ")]
+        names = tuple(f"{g.key} {group} {m}" if g.paradigm == "activity" else f"{g.key} {m}"
+                      for m in metrics)
+        cols.update(zip(names, (gbdt[f"{group} {m}"] for m in metrics), strict=True))
+        if g.paradigm == "activity":
+            facets.append(P.ShareFacet(group, names, tuple(metrics), g.title))
+        else:
+            facets.append(P.ShareFacet(g.title, names, tuple(metrics)))
+    cols[f"{c.key} perm"] = chronos
+    facets.append(P.ShareFacet(c.title, (f"{c.key} perm",), ("perm",)))
+    mat = pd.DataFrame(cols).reindex(list(CATEGORY_ORDER)).fillna(0.0)
+    mat = mat.loc[(mat != 0).any(axis=1)]
     mat.reset_index(names="category").to_csv(
         ctx.out / "Feature-importancesharebycategory_grouped.csv", index=False, lineterminator="\n"
     )
     with thesis_style():
-        fig = P.category_share_heatmap(mat)
+        fig = P.importance_share_heatmap(mat, facets, footnote=_FI_FOOTNOTE)
         return [ctx.figure("Feature-importancesharebycategory_grouped.svg", fig),
                 ctx.out / "Feature-importancesharebycategory_grouped.csv"]
 
 
 def build_importance_per_activity(ctx: BuildContext) -> list[Path]:
-    d = _activity_importancedict(ctx)
+    """F23: top-15 gain/permutation features of the best GBDT, one row per tier if Activity.
+
+    The file name stays the thesis' (``main.tex`` includes it) even when the
+    chosen model is Global and the figure has a single row.
+    """
+    g, _ = _fi_models(ctx)
+    d = _gbdt_importancedict(ctx, g)
+    title = ("Top 15 Feature Importances per Activity Level" if g.paradigm == "activity"
+             else f"Top 15 Feature Importances, {g.title}")
     with thesis_style():
-        fig = P.feature_importance_grid(d, "Top 15 Feature Importances per Activity Level")
+        fig = P.feature_importance_grid(d, title)
         return [ctx.figure("Top15FeatureImportancesperActivityLevel.svg", fig, tight=False)]
 
 
 def build_chronos_importance(ctx: BuildContext) -> list[Path]:
-    imp = ctx.source.chronos_importance()
-    d = {"chronos2": {"Permutation importance": imp}}
+    """F21: top-15 permutation importance of the best Chronos-2 variant."""
+    _, c = _fi_models(ctx)
+    d = {"chronos2": {"Permutation importance": _chronos_importance(ctx, c)}}
+    title = ("Chronos2 Local Feature Importance" if c.model == "chronos2_fine_tuned"
+             else f"Chronos2 Local Feature Importance ({C.pretty_model(c.model)})")
     with thesis_style():
-        fig = P.feature_importance_grid(d, "Chronos2 Local Feature Importance")
+        fig = P.feature_importance_grid(d, title)
         return [ctx.figure("Chronos2LocalFeatureImportance.svg", fig, tight=False)]
 
 
@@ -636,15 +754,19 @@ def _items() -> list[Item]:
         Item("F20", "fig:importancesharebycategory_grouped", 1115, "RESULTS", "figure",
              ("Feature-importancesharebycategory_grouped.svg",
               "Feature-importancesharebycategory_grouped.csv"),
-             "importance_all.csv (activity CatBoost-Tweedie, tiers 1-3)", build_importance_share,
-             "AR cells 47, 52"),
+             "importance of the best Global/Activity count GBDT (per tier if Activity) and the "
+             "best Chronos-2 variant, picked from the master leaderboard", build_importance_share,
+             "AR cells 47, 52; one heatmap for both models (2026-09-29)"),
         Item("F21", "fig:top_fi_chronos2", 1125, "RESULTS", "figure",
-             ("Chronos2LocalFeatureImportance.svg",), "Chronos-2 fine-tuned permutation importance",
+             ("Chronos2LocalFeatureImportance.svg",),
+             "permutation importance of the best Chronos-2 variant (master leaderboard)",
              build_chronos_importance, "AR cells 45, 51"),
         Item("F22", "fig:judging_system", 1260, S, "figure", ("LLM_as_judge.svg",), "Lucidchart"),
         Item("F23", "fig:top_fi_per_activity", 1611, "RESULTS", "figure",
-             ("Top15FeatureImportancesperActivityLevel.svg",), "importance_all.csv",
-             build_importance_per_activity, "AR cells 47, 50"),
+             ("Top15FeatureImportancesperActivityLevel.svg",),
+             "importance of the best Global/Activity count GBDT (master leaderboard)",
+             build_importance_per_activity,
+             "AR cells 47, 50; one row per tier if the model is Activity, else one row"),
         Item("T1", "tab:acledData", 184, S, "table", (), "ACLED codebook (typed)"),
         Item("T2", "tab:activitytiers", 297, "DATA", "table",
              ("tab_activitytiers.csv", "tab_activitytiers.tex"),

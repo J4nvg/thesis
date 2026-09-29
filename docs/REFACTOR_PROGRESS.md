@@ -1365,3 +1365,33 @@ built with `thread_count=12` -> ~144 threads on the 16 CPUs of the job (`-c 16`)
   `docs/WANDB.md` updated. As for cv/test, a re-run resumes the same W&B run, so its early steps
   are dropped by W&B until they pass the old step (the log lines are unaffected).
 - TIME_TABLE `importance` stays 16 h (no clean timing yet); the killed jobs need a resubmit.
+
+## Importance figures follow the leaderboard — 2026-09-29
+
+The seed-42 publication run (`runs_publication_20260929`, compared with the thesis in
+`docs/audits/2026-09-29/RESULTS_COMPARISON.md`) moved Activity CatBoost-Tweedie from #1 to #11, but
+F20/F21/F23 were hard-coded to it. Jan's decisions: the figures show the two leading models, picked
+from the master leaderboard at figure time: the best count GBDT (LightGBM/XGBoost/CatBoost x
+Poisson/Tweedie, Global or Activity; Local excluded) and the best Chronos-2 variant.
+- F20 `Feature-importancesharebycategory_grouped` is ONE heatmap: GBDT gain | perm (one facet per
+  tier if the GBDT is Activity, else one facet) + Chronos-2 perm, shared colour scale, footnote that
+  Chronos-2 ranks covariates only (its own strike history is the context window). CSV columns are
+  `<model>_<paradigm> [Tier k] <metric>`.
+- F23 (appendix top-15 grid) and F21 (Chronos-2 top-15) use the same two models; file names unchanged
+  so `main.tex` keeps its `\includesvg` paths.
+- A chosen model without importance -> item `skipped`, reason names the exact
+  `strikecast importance ...` cluster job (or add it to `importance_stage.DEFAULT_JOBS`).
+- `--source legacy` still reproduces the thesis tier numbers (plus the Chronos-2 column).
+- Files: `reporting/{build,plots,sources}.py`, `tests/unit/test_reporting.py` (3 new tests).
+  Suite: 1598 passed; 4 `test_feature_selection_cache` failures are environmental (need
+  `PYTHONHASHSEED=0`, pass with it); `test_diffreg_selection_agrees_with_golden_up_to_near_ties` flaky.
+- `runs_publication_20260929/_figures` regenerated locally with `PYTHONHASHSEED=0` (other outputs equal
+  to the cluster build up to float noise).
+- Follow-up (same day): `Activity_Level_statcov_*` is now Spatial / static (Jan's decision; the notebook's
+  `_target` rule made it autoregressive). Thesis figures unchanged; Global CatBoost-Tw gain shares 77/6 -> 34/50
+  (autoregressive/static). Tests: notebook-equality test lists it as a deliberate deviation. Full suite with
+  `PYTHONHASHSEED=0`: 1603 passed, 13 skipped, 1 xfailed.
+- Chronos-2 permutation importance (thesis and publication runs) is effectively ONE shuffle: AutoGluon reuses
+  `RandomState(random_seed)` for every shuffle set and 20 regions <= `subsample_size`, so stdev = 0 for 101/112
+  features. Only its top ~7 exceed the largest negative importance. Not fixed; proposed as a cluster job (seed per
+  shuffle set). Proposed thesis wording: `docs/audits/2026-09-29/MAIN_TEX_PROPOSED_CHANGES.md` (main.tex untouched).

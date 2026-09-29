@@ -273,9 +273,21 @@ FEATURES = [
 ]
 
 
-@pytest.mark.parametrize("name", FEATURES)
+#: Features whose category deliberately differs from the notebook (see CATEGORY_RULES).
+DEVIATIONS = {"Activity_Level_statcov_target_act_drone_strike_on_ua": "Spatial / static"}
+
+
+@pytest.mark.parametrize("name", [f for f in FEATURES if f not in DEVIATIONS])
 def test_classify_feature_equals_the_notebook(name: str) -> None:
     assert imp.classify_feature(name) == legacy_classify_feature(name)
+
+
+@pytest.mark.parametrize(("name", "category"), DEVIATIONS.items())
+def test_activity_level_is_static_not_autoregressive(name: str, category: str) -> None:
+    """The tier indicator is a static region descriptor (2026-09-29); the notebook's
+    ``_target`` rule had made it autoregressive."""
+    assert legacy_classify_feature(name) == "Autoregressive strikes"
+    assert imp.classify_feature(name) == category
 
 
 @pytest.mark.parametrize("name", [f for f in FEATURES if "expdecay7" in f])
@@ -289,11 +301,14 @@ def test_the_expdecay_switch_never_moves_a_category(name: str) -> None:
 
 
 def test_the_rules_are_the_thesis_table() -> None:
-    """``tab:semantic_categories`` (main.tex ~1577), row for row."""
+    """``tab:semantic_categories`` (main.tex ~1577), row for row, plus
+    ``activity_level_statcov`` in Spatial / static (2026-09-29; the table gets the same
+    row, docs/audits/2026-09-29/MAIN_TEX_PROPOSED_CHANGES.md)."""
     table = {
         "Autoregressive strikes": {"total_daily_strike_events", "drone_strike_on", "_target",
                                    "specialmilitary", "ratio_ua_rus"},
-        "Spatial / static": {"region_statcov", "dist_to_nearest", "dist_x_clash", "area_km2"},
+        "Spatial / static": {"region_statcov", "activity_level_statcov", "dist_to_nearest",
+                             "dist_x_clash", "area_km2"},
         "Weather / geomag.": {"env_weather", "env_k_max"},
         "Conflict & damage": {"disrupted_weapons", "shelling", "armed_clash", "damage_events",
                               "drone_infra", "acled_other"},

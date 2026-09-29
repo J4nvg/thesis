@@ -71,6 +71,10 @@ _BEST_PARAM_KEYS = {
 }
 
 
+#: Chronos-2 store name -> suffix of ``results/chronos2/feature_importance_chronos2_<s>.csv``.
+_LEGACY_CHRONOS_FI = {"chronos2_fine_tuned": "ft", "chronos2_zero_shot": "zs"}
+
+
 class MissingInput(RuntimeError):
     """An input an item needs is not in this source (the item is skipped)."""
 
@@ -122,8 +126,9 @@ class ResultsSource:
         """``results/gbdt/importance_all.csv`` schema (``model``, ``Feature``, ...)."""
         raise NotImplementedError
 
-    def chronos_importance(self) -> pd.DataFrame:
-        """``Feature, importance, ...`` of the fine-tuned Chronos-2."""
+    def chronos_importance(self, model: str = "chronos2_fine_tuned") -> pd.DataFrame:
+        """``Feature, importance, ...`` of one Chronos-2 variant (``chronos2_fine_tuned`` /
+        ``chronos2_zero_shot``)."""
         raise NotImplementedError
 
     def best_params(self, key: str) -> dict[str, Any]:
@@ -234,8 +239,10 @@ class LegacySource(ResultsSource):
     def gbdt_importance(self) -> pd.DataFrame:
         return _read_csv(self.root / "gbdt" / "importance_all.csv")
 
-    def chronos_importance(self) -> pd.DataFrame:
-        df = _read_csv(self.root / "chronos2" / "feature_importance_chronos2_ft.csv")
+    def chronos_importance(self, model: str = "chronos2_fine_tuned") -> pd.DataFrame:
+        if model not in _LEGACY_CHRONOS_FI:
+            raise MissingInput(f"no legacy Chronos-2 importance file for {model!r}")
+        df = _read_csv(self.root / "chronos2" / f"feature_importance_chronos2_{_LEGACY_CHRONOS_FI[model]}.csv")
         return df.rename(columns={"Unnamed: 0": "Feature"})
 
     def best_params(self, key: str) -> dict[str, Any]:
@@ -445,11 +452,11 @@ class StoreSource(ResultsSource):
         path = self.root / "count" / "report" / "importance" / f"seed={self.seed}"
         return _read_csv(path / "importance_all.csv")
 
-    def chronos_importance(self) -> pd.DataFrame:
+    def chronos_importance(self, model: str = "chronos2_fine_tuned") -> pd.DataFrame:
         candidates = [
             self.root / "chronos2" / "report" / "importance" / f"seed={self.seed}"
-            / "feature_importance_chronos2_fine_tuned.csv",
-            self.store.run_dir("chronos2", "chronos2_fine_tuned", "global", self.seed)
+            / f"feature_importance_{model}.csv",
+            self.store.run_dir("chronos2", model, "global", self.seed)
             / "importance" / "importance.csv",
         ]
         for path in candidates:

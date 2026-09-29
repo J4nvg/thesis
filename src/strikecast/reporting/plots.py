@@ -10,7 +10,9 @@ scoped style (audit C5); layout, sizes and colours follow the cells.
 from __future__ import annotations
 
 import itertools
+import textwrap
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
@@ -22,8 +24,9 @@ __all__ = [
     "NAIVE_COLOR",
     "calibration_prcurve",
     "cd_label",
-    "category_share_heatmap",
+    "ShareFacet",
     "feature_importance_grid",
+    "importance_share_heatmap",
     "model_colors",
     "per_region_grid",
     "prauc_prevalence_scatter",
@@ -239,30 +242,76 @@ def feature_importance_grid(
     return fig
 
 
-def category_share_heatmap(mat: pd.DataFrame, tiers: Sequence[str] = ("Tier 1", "Tier 2", "Tier 3")) -> Any:
-    """Cell 52: gain/perm category shares per tier, one heatmap facet per tier."""
+@dataclass(frozen=True)
+class ShareFacet:
+    """One heatmap panel of :func:`importance_share_heatmap`.
+
+    ``columns`` are columns of the share matrix, drawn left to right under the
+    x tick labels ``ticks``; ``group`` is the model name written once above
+    all consecutive facets that share it (the tiers of an Activity model).
+    """
+
+    title: str
+    columns: tuple[str, ...]
+    ticks: tuple[str, ...]
+    group: str = ""
+
+
+def importance_share_heatmap(
+    mat: pd.DataFrame, facets: Sequence[ShareFacet], *, footnote: str = ""
+) -> Any:
+    """Category shares of the two leading models in one heatmap (F20).
+
+    Rows = categories (:data:`~strikecast.evaluation.importance.CATEGORY_ORDER`),
+    one facet per model (or per tier of an Activity model), one column per
+    importance metric; a single colour scale and colour bar for the whole
+    figure so shares compare across models. Built on cell 52's per-tier facets.
+    """
     import matplotlib.pyplot as plt  # noqa: PLC0415
     import seaborn as sns  # noqa: PLC0415
 
     from strikecast.evaluation.importance import CATEGORY_ORDER  # noqa: PLC0415
 
-    vmax = float(mat.values.max())
-    facet_order = [c for c in CATEGORY_ORDER if c in mat.index][::-1]
-    fig, axes = plt.subplots(1, len(tiers), figsize=(13, 6))
-    cbar_ax = fig.add_axes([0.92, 0.15, 0.015, 0.7])
-    for i, t in enumerate(tiers):
-        sub = mat[[f"{t} gain", f"{t} perm"]].reindex(facet_order)
-        sub.columns = ["gain", "perm"]
+    vmax = float(mat.to_numpy().max())
+    rows = [c for c in CATEGORY_ORDER if c in mat.index][::-1]
+    widths = [len(f.columns) for f in facets]
+    width = max(9.0, 3.2 + 1.3 * sum(widths))
+    left = 2.3 / width  # room for the category labels, fixed in inches
+    grouped = any(len(list(m)) > 1 for g, m in itertools.groupby(facets, key=lambda f: f.group) if g)
+    fig = plt.figure(figsize=(width, 6.8))
+    grid = fig.add_gridspec(1, len(facets), width_ratios=widths, left=left, right=0.88,
+                            top=0.78 if grouped else 0.84, bottom=0.14 if footnote else 0.08,
+                            wspace=0.08)
+    cbar_ax = fig.add_axes([0.9, 0.18, 0.015, 0.56])
+    axes = []
+    for i, facet in enumerate(facets):
+        ax = fig.add_subplot(grid[0, i])
+        sub = mat[list(facet.columns)].reindex(rows)
+        sub.columns = list(facet.ticks)
         annot = sub.map(lambda v: f"{v:.0%}" if v > 0 else "")
-        last = i == len(tiers) - 1
-        sns.heatmap(sub, ax=axes[i], cmap="Blues", vmin=0, vmax=vmax, annot=annot, fmt="",
+        last = i == len(facets) - 1
+        sns.heatmap(sub, ax=ax, cmap="Blues", vmin=0, vmax=vmax, annot=annot, fmt="",
                     linewidths=0.5, linecolor="white", cbar=last,
                     cbar_ax=cbar_ax if last else None, yticklabels=(i == 0),
                     cbar_kws={"label": "share within column (top 15)"} if last else None)
-        axes[i].set(title=t, xlabel="", ylabel="")
-        plt.setp(axes[i].get_xticklabels(), rotation=0)
-    fig.suptitle("Feature-importance share by category  (top 15 features per column)", fontsize=14)
-    fig.subplots_adjust(right=0.9, top=0.9, wspace=0.1)
+        ax.set(xlabel="", ylabel="")
+        ax.set_title(textwrap.fill(facet.title, width=max(14, 12 * len(facet.columns))),
+                     fontsize=12)
+        plt.setp(ax.get_xticklabels(), rotation=0)
+        axes.append(ax)
+    fig.canvas.draw()  # positions are final only after layout
+    for group, members in itertools.groupby(enumerate(facets), key=lambda t: t[1].group):
+        idx = [i for i, _ in members]
+        if not group or len(idx) < 2:  # a lone facet carries the name as its title
+            continue
+        left, right = axes[idx[0]].get_position().x0, axes[idx[-1]].get_position().x1
+        fig.text((left + right) / 2, 0.875, group, ha="center", va="bottom", fontsize=13,
+                 fontweight="bold")
+    fig.suptitle("Feature-importance share by category  (top 15 features per column)",
+                 fontsize=14, y=0.97)
+    if footnote:
+        fig.text(left, 0.02, textwrap.fill(footnote, width=int(13 * (0.88 - left) * width)),
+                 ha="left", va="bottom", fontsize=9, style="italic")
     return fig
 
 

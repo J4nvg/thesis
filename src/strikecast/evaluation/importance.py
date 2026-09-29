@@ -88,8 +88,17 @@ TOP_N = 15
 
 #: ``classify_feature``'s rules, in its order (first match wins). The last
 #: category, ``Other``, is the fall-through.
+#:
+#: One deliberate deviation from the notebook (Jan, 2026-09-29): the static
+#: activity-tier indicator ``Activity_Level_statcov_target_...`` is Spatial /
+#: static. The notebook sent it to Autoregressive strikes via ``_target``; that
+#: never showed in the thesis (constant within an Activity tier model) but it is
+#: the top feature of the Global GBDTs.
 CATEGORY_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Spatial / static", ("region_statcov", "dist_to_nearest", "dist_x_clash", "area_km2")),
+    (
+        "Spatial / static",
+        ("region_statcov", "activity_level_statcov", "dist_to_nearest", "dist_x_clash", "area_km2"),
+    ),
     ("Weather / geomag.", ("env_weather", "env_k_max")),
     ("Calendar", ("holiday",)),
     ("Cyber", ("act_cyber",)),

@@ -249,9 +249,17 @@ def test_tuning_best_all_matches_thesis(legacy_out: Path) -> None:
 
 
 def test_importance_share_reproduces_thesis_file(legacy_out: Path) -> None:
+    """F20 from the thesis results: the leaderboard picks Activity CatBoost-Tweedie (rank 1)
+    and the fine-tuned Chronos-2 (rank 2); the tier columns are the thesis numbers."""
     mat = _csv(legacy_out, "Feature-importancesharebycategory_grouped").set_index("category")
-    assert list(mat.columns) == [f"Tier {t} {m}" for t in (1, 2, 3) for m in ("gain", "perm")]
+    tiers = [f"catboost_tweedie_activity Tier {t} {m}" for t in (1, 2, 3) for m in ("gain", "perm")]
+    assert list(mat.columns) == [*tiers, "chronos2_fine_tuned_local perm"]
     np.testing.assert_allclose(mat.sum(axis=0).to_numpy(), 1.0)
+    # main.tex:1120-1122: tier 1 conflict 62 % gain / 48 % perm, tier 3 autoregressive 82 % / 66 %
+    conflict = mat.loc["Conflict & damage"]
+    assert round(conflict[tiers[0]], 2) == 0.62 and round(conflict[tiers[1]], 2) == 0.48
+    ar = mat.loc["Autoregressive strikes"]
+    assert round(ar[tiers[4]], 2) == 0.82 and round(ar[tiers[5]], 2) == 0.66
 
 
 def test_figures_same_size_as_thesis_svgs(legacy_out: Path) -> None:
@@ -261,9 +269,10 @@ def test_figures_same_size_as_thesis_svgs(legacy_out: Path) -> None:
         pytest.skip("thesis fig/ folder not available")
     import re
 
+    # Feature-importancesharebycategory_grouped.svg is left out on purpose: since
+    # 2026-09-29 it adds the Chronos-2 column to the thesis' three tier facets.
     same = ["top_5_combined.svg", "calibration_prcurve.svg", "prauc_vs_prevalence.svg",
-            "top20_rmse_horizon.svg", "Feature-importancesharebycategory_grouped.svg",
-            "Chronos2LocalFeatureImportance.svg", "Top15FeatureImportancesperActivityLevel.svg",
+            "top20_rmse_horizon.svg", "Chronos2LocalFeatureImportance.svg", "Top15FeatureImportancesperActivityLevel.svg",
             "fig_eda2c_stl_side_by_side.svg", "spatiotemporalintensityheatmap.svg",
             "strike_activity_per_region.svg", "strike_activity_per_region_activity_level.svg"]
     size = re.compile(r'<svg [^>]*?width="([^"]+)" height="([^"]+)"', re.DOTALL)
@@ -460,3 +469,78 @@ def test_split_dimensions_is_the_darts_split() -> None:
 def test_legacy_source_missing_dir(tmp_path: Path) -> None:
     with pytest.raises(MissingInput):
         LegacySource(tmp_path / "nope")
+
+
+# --------------------------------------------------------------------------- #
+# F20/F21/F23: the two leading models of the leaderboard (2026-09-29)
+# --------------------------------------------------------------------------- #
+class _FISource(LegacySource):
+    """A leaderboard plus importance frames, nothing else."""
+
+    name = "store"
+
+    def __init__(self, rows: list[tuple[str, str, str, float]], labels: list[str]) -> None:
+        self.root, self.seed = Path("/runs"), 42
+        self._lb = pd.DataFrame(rows, columns=["Modelname", "paradigm", "model", "RMSE"])
+        self._lb["MAE"] = self._lb["RMSE"] / 2
+        self._labels = labels
+
+    def leaderboards(self) -> pd.DataFrame:
+        return self._lb
+
+    def gbdt_importance(self) -> pd.DataFrame:
+        feats = ["act_drone_strike_on_ua_target_lag-1", "env_weather_rain_sum_futcov_lag0",
+                 "acled_other_rus_armed_clash_pastcov_lag-1"]
+        return pd.DataFrame([{"model": lab, "Feature": f, "agg_gain": 3.0 - i, "agg_perm": 1.0 + i}
+                             for lab in self._labels for i, f in enumerate(feats)])
+
+    def chronos_importance(self, model: str = "chronos2_fine_tuned") -> pd.DataFrame:
+        return pd.DataFrame({"Feature": [f"{model}_env_weather_x", "com_diplo_y"],
+                             "importance": [0.3, 0.1]})
+
+
+_BASE_ROWS = [("diff", "global", "naive_weekly", 2.2), ("diff", "global", "arima", 1.85),
+              ("chronos2", "local", "chronos2_zero_shot", 1.83),
+              ("chronos2", "local", "chronos2_fine_tuned", 1.84),
+              ("gbdt", "local", "lightgbm_poisson", 1.70),  # Local is outside the pool
+              ("lstm", "activity", "lstm_poisson_w28", 1.75)]
+
+
+def _fi_build(tmp_path: Path, rows, labels) -> dict[str, object]:
+    items = build_all(_FISource(rows, labels), tmp_path, data_dir=tmp_path / "nodata",
+                      only=["F20", "F21", "F23"])
+    return {i.id: i for i in items}
+
+
+def test_importance_figures_follow_the_leaderboard(tmp_path: Path) -> None:
+    rows = [*_BASE_ROWS, ("gbdt", "global", "catboost_tweedie", 1.80),
+            ("gbdt", "activity", "lightgbm_poisson", 1.81)]
+    items = _fi_build(tmp_path, rows, ["global_catboost_tweedie"])
+    assert {k: items[k].status for k in ("F20", "F21", "F23")} == dict.fromkeys(
+        ("F20", "F21", "F23"), "generated")
+    mat = pd.read_csv(tmp_path / "Feature-importancesharebycategory_grouped.csv").set_index("category")
+    # best Global/Activity GBDT (not the Local one, not the RNN) + best Chronos-2 (zero-shot)
+    assert list(mat.columns) == ["catboost_tweedie_global gain", "catboost_tweedie_global perm",
+                                 "chronos2_zero_shot_local perm"]
+    np.testing.assert_allclose(mat.sum(axis=0).to_numpy(), 1.0)
+    assert "catboost_tweedie_global (rank 3), chronos2_zero_shot_local (rank 5)" in items["F20"].notes[0]
+
+
+def test_activity_gbdt_gets_one_facet_per_tier(tmp_path: Path) -> None:
+    rows = [*_BASE_ROWS, ("gbdt", "activity", "catboost_tweedie_tuned", 1.79)]
+    labels = [f"activity_{t}_catboost_tweedie" for t in (1, 2, 3)]
+    _fi_build(tmp_path, rows, labels)
+    mat = pd.read_csv(tmp_path / "Feature-importancesharebycategory_grouped.csv").set_index("category")
+    assert list(mat.columns) == [f"catboost_tweedie_activity Tier {t} {m}"
+                                 for t in (1, 2, 3) for m in ("gain", "perm")] + [
+        "chronos2_zero_shot_local perm"]
+
+
+def test_missing_importance_names_the_job(tmp_path: Path) -> None:
+    rows = [*_BASE_ROWS, ("gbdt", "global", "xgboost_poisson", 1.80)]
+    items = _fi_build(tmp_path, rows, ["global_catboost_tweedie"])
+    for item_id in ("F20", "F23"):
+        assert items[item_id].status == "skipped"
+        assert ("strikecast importance experiment=count model=xgboost_poisson paradigm=global "
+                "seed=42 --store-root /runs") in items[item_id].reason
+    assert items["F21"].status == "generated"  # the Chronos-2 figure does not need the GBDT
