@@ -40,7 +40,24 @@ The stage is resumable in the run-store sense: it is identified by
 ``stage_hash(resolved importance config, upstream hashes, seed)`` and a
 complete stage with the same identity is skipped (``--force`` recomputes).
 A GBDT activity run writes nothing until all its groups are done; a killed job
-recomputes the run (minutes to ~2 h, see ``impl_stream2.md``).
+recomputes the run. The permutation half costs ``7 horizons x n_features x
+n_repeats`` predictions over the group's full design matrix, i.e. hours per
+group for the count family (``impl_stream2.md`` guessed minutes to ~2 h; see
+``timings.json`` of a completed run for the real figure).
+
+Parallelism: ``n_jobs=-1``/``None`` (the CLI default) no longer means "one
+joblib worker per CPU" but :func:`permutation_workers`: as many workers as fit
+next to the model's own threads on the CPUs this process may use, i.e. 1 for
+the count family (12 pinned threads) on a 16-CPU SLURM job. Before this, 12
+workers x 12 CatBoost threads ran on 16 CPUs and ``importance:count:
+catboost_tweedie:{global,activity}`` did not finish the first group in 11 h.
+``n_jobs`` never changes a value (sklearn draws the permutation seeds up
+front) and is not part of the stage identity.
+
+Progress: every group logs its design-matrix shape and every horizon its
+seconds, the elapsed time and an ETA (INFO); the same numbers are mirrored to
+the tracker as ``importance/*`` metrics (W&B ``job_type=importance``), with
+``step`` = horizons done so far over all groups.
 """
 
 from __future__ import annotations
@@ -56,7 +73,14 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
-from strikecast.pipeline.context import get_spec, make_run_context, resolve_store_root
+from strikecast.pipeline.context import (
+    get_spec,
+    make_run_context,
+    make_tracker,
+    resolve_store_root,
+    track,
+    tracker_tags,
+)
 from strikecast.seeds import record_env, seed_everything
 from strikecast.store import RunKey, RunStore, stage_hash
 
@@ -69,9 +93,12 @@ __all__ = [
     "GBDT_FAMILIES",
     "IMPORTANCE_STAGE",
     "ImportanceOutcome",
+    "available_cpus",
     "collect_importance",
     "default_jobs",
     "importance_dir",
+    "model_threads",
+    "permutation_workers",
     "run_importance",
 ]
 
@@ -157,6 +184,141 @@ def _atomic_json(path: Path, payload: Any) -> Path:
     return path
 
 
+def available_cpus() -> tuple[int, str]:
+    """``(cpus, source)``: the CPUs this process may actually run on.
+
+    ``os.sched_getaffinity`` respects the SLURM cgroup/cpuset (``-c 16`` on a
+    64-CPU node gives 16); macOS has no affinity API, so it falls back to
+    ``SLURM_CPUS_PER_TASK`` and then ``os.cpu_count()``.
+    """
+    getaffinity = getattr(os, "sched_getaffinity", None)
+    if getaffinity is not None:
+        try:
+            n = len(getaffinity(0))
+        except OSError:
+            n = 0
+        if n > 0:
+            return n, "sched_getaffinity"
+    slurm = os.environ.get("SLURM_CPUS_PER_TASK", "")
+    try:
+        n = int(slurm)
+    except ValueError:
+        n = 0
+    if n > 0:
+        return n, "SLURM_CPUS_PER_TASK"
+    return max(1, os.cpu_count() or 1), "os.cpu_count"
+
+
+def model_threads(cfg: ExperimentConfig, spec: Any, model_name: str) -> int | None:
+    """The threads the built estimator uses, or ``None`` for "all it can get".
+
+    Only the specs whose legacy builder passed a thread keyword
+    (``spec.threads_from_context``, e.g. every count GBDT) are pinned to
+    ``cfg.resolved_threads``. The others (diff XGBoost ``device="cuda"``,
+    diff CatBoost ``task_type="GPU"``) use the library default, which is every
+    core -- and a GPU model must not be shared by parallel workers either.
+    """
+    device = str(cfg.device_for(model_name) or "").lower()
+    if device in ("cuda", "gpu") or device.startswith("cuda:"):
+        return None
+    if not getattr(spec, "threads_from_context", False):
+        return None
+    threads = cfg.resolved_threads
+    return int(threads) if threads else None
+
+
+def permutation_workers(
+    n_jobs: int | None,
+    *,
+    threads: int | None,
+    cpus: int | None = None,
+) -> int:
+    """joblib workers for ``permutation_importance``.
+
+    An explicit positive ``n_jobs`` wins. ``-1``/``None``/``0`` (the CLI
+    default) means as many workers as fit: ``max(1, cpus // threads)``, so
+    that ``workers x model threads <= cpus``; an unpinned model (``threads``
+    ``None``) is taken to use every CPU, i.e. one worker. The value never
+    changes a result (sklearn draws the permutation seeds from
+    ``random_state`` before dispatching), only the wall time.
+    """
+    if n_jobs is not None and int(n_jobs) >= 1:
+        return int(n_jobs)
+    cpus = available_cpus()[0] if cpus is None else max(1, int(cpus))
+    per_worker = int(threads) if threads and int(threads) > 0 else cpus
+    return max(1, cpus // per_worker)
+
+
+class _Progress:
+    """Per-group / per-horizon progress: INFO log lines and tracker metrics.
+
+    The tracker is a mirror (§5.5): every call goes through
+    :func:`~strikecast.pipeline.context.track`, so a no-op or broken tracker
+    changes nothing. ``step`` is the number of horizons done over all groups.
+    """
+
+    def __init__(self, tracker: Any, n_groups: int, n_jobs: int) -> None:
+        self.tracker = tracker
+        self.n_groups = n_groups
+        self.n_jobs = n_jobs
+        self.start = time.perf_counter()
+        self.group_index = 0
+        self.label = ""
+        self.group_start = self.start
+        self.horizon_seconds: list[float] = []
+        self.n_horizons = 0
+        self.step = 0
+
+    def group(self, index: int, label: str, n_regions: int) -> None:
+        self.group_index, self.label = index, label
+        self.group_start = time.perf_counter()
+        logger.info("importance %s: group %d/%d (%d regions)", label, index, self.n_groups,
+                    n_regions)
+
+    def fitted(self, seconds: float) -> None:
+        logger.info("importance %s: fit in %.1f s", self.label, seconds)
+
+    def __call__(self, event: str, info: Any) -> None:
+        if event == "design":
+            logger.info(
+                "importance %s: design matrix %d rows x %d features (%.1f s); "
+                "permutation with n_jobs=%d",
+                self.label, int(info["rows"]), int(info["features"]), float(info["seconds"]),
+                self.n_jobs,
+            )
+            track(self.tracker, "log_fold", self.step, {
+                "importance/group_index": self.group_index,
+                "importance/n_groups": self.n_groups,
+                "importance/design_rows": int(info["rows"]),
+                "importance/design_features": int(info["features"]),
+                "importance/n_jobs": self.n_jobs,
+            })
+        elif event == "horizon":
+            h, n_h, seconds = int(info["horizon"]), int(info["n_horizons"]), float(info["seconds"])
+            self.n_horizons = n_h
+            self.horizon_seconds.append(seconds)
+            self.step += 1
+            now = time.perf_counter()
+            mean = sum(self.horizon_seconds) / len(self.horizon_seconds)
+            remaining = (n_h - h) + (self.n_groups - self.group_index) * n_h
+            eta = remaining * mean
+            total = self.n_groups * n_h
+            logger.info(
+                "importance %s: group %d/%d horizon %d/%d in %.1f s; elapsed %.1f s "
+                "(group %.1f s); ETA %.1f s (%d horizons left x %.1f s mean)",
+                self.label, self.group_index, self.n_groups, h, n_h, seconds,
+                now - self.start, now - self.group_start, eta, remaining, mean,
+            )
+            track(self.tracker, "log_fold", self.step, {
+                "importance/group_index": self.group_index,
+                "importance/horizon": h,
+                "importance/horizon_seconds": seconds,
+                "importance/elapsed_seconds": now - self.start,
+                "importance/progress_frac": self.step / total if total else 1.0,
+                "importance/eta_seconds": eta,
+            })
+
+
 def group_label(paradigm: str, group: str, model: str) -> str:
     """``global_<m>`` / ``activity_<tier>_<m>`` / ``local_<region>_<m>`` (cell 57)."""
     if paradigm == "global":
@@ -180,19 +342,32 @@ def run_importance(
     n_repeats: int = N_REPEATS,
     n_jobs: int | None = -1,
     random_state: int = RANDOM_STATE,
+    tracker: Any = None,
 ) -> ImportanceOutcome:
     """Compute (or skip) the importance of one ``(model, paradigm, seed)``."""
     store = store if store is not None else RunStore(resolve_store_root(cfg))
-    if n_jobs is None or n_jobs < 1:
-        # Legacy passed n_jobs=-1 on Colab, where "all CPUs" meant 12 = the family's
-        # pinned thread count. On a 64-CPU cluster node -1 means 64 loky workers,
-        # each holding the model + design matrix and running CatBoost's own 12
-        # threads: workers were killed with SIGABRT (cluster jobs 64558/64559).
-        # Permutation seeds are drawn up front from random_state, so the result
-        # does not depend on n_jobs, and n_jobs is not part of the stage identity.
-        n_jobs = int(cfg.resolved_threads or 1)
     spec = get_spec(model_name, cfg.name)
     key = RunKey(cfg.name, model_name, str(paradigm), int(seed))
+    # Legacy passed n_jobs=-1 on Colab, where "all CPUs" meant 12 = the family's
+    # pinned thread count. On a 64-CPU node -1 meant 64 loky workers (SIGABRT,
+    # cluster jobs 64558/64559); cfg.resolved_threads (12) workers x 12 CatBoost
+    # threads on a 16-CPU job never finished a group. permutation_workers keeps
+    # workers x model threads <= the CPUs we have. Permutation seeds are drawn
+    # up front from random_state, so the result does not depend on n_jobs, and
+    # n_jobs is not part of the stage identity.
+    cpus, cpu_source = available_cpus()
+    is_gbdt = spec.kind == "global" and spec.family in GBDT_FAMILIES
+    threads = model_threads(cfg, spec, model_name) if is_gbdt else None
+    requested_jobs = n_jobs
+    n_jobs = permutation_workers(n_jobs, threads=threads, cpus=cpus)
+    parallelism = {
+        "n_jobs": n_jobs,
+        "n_jobs_requested": requested_jobs,
+        "cpus_available": cpus,
+        "cpus_source": cpu_source,
+        "model_threads": threads,
+        "cpu_count": os.cpu_count(),
+    }
 
     if spec.kind == "chronos":
         resolved: dict[str, Any] = {"family": "chronos", "method": "autogluon_permutation",
@@ -254,6 +429,25 @@ def run_importance(
         store.write_config(key, cfg.model_dump(mode="json"))
     if not (run_dir / "env.json").exists():
         store.write_env(key, record_env())
+
+    # The W&B mirror (§5.5): its own run per stage, job_type "importance".
+    owns_tracker = tracker is None
+    tracker = tracker if tracker is not None else make_tracker(cfg)
+    tracked_id = None
+    try:
+        tracked_id = tracker.start(
+            key, cfg.model_dump(mode="json"), tags=tracker_tags(cfg, spec), stage=IMPORTANCE_STAGE
+        )
+    except Exception as exc:  # pragma: no cover - the mirror never fails a run
+        logger.warning("tracker.start failed: %s", exc)
+    if tracked_id:
+        store.record_tracker_run_id(key, tracked_id, stage=IMPORTANCE_STAGE)
+    if is_gbdt:
+        logger.info(
+            "%s/%s: permutation n_jobs=%d (requested %s; %d CPUs via %s; model threads %s)",
+            key.relative(), IMPORTANCE_STAGE, n_jobs, requested_jobs, cpus, cpu_source,
+            threads if threads is not None else "unpinned",
+        )
     start = time.perf_counter()
     try:
         if spec.kind == "chronos":
@@ -273,22 +467,30 @@ def run_importance(
                 n_repeats=n_repeats,
                 n_jobs=n_jobs,
                 random_state=random_state,
+                tracker=tracker,
             )
         seconds = time.perf_counter() - start
         _atomic_json(
             importance_dir(store, key) / "timings.json",
-            {"total_s": seconds, "groups": timings, "n_jobs": n_jobs,
-             "cpu_count": os.cpu_count()},
+            {"total_s": seconds, "groups": timings, **parallelism},
         )
         store.complete_stage(key, IMPORTANCE_STAGE)
+        track(tracker, "log_artifact", importance_dir(store, key), "artifacts")
     except KeyboardInterrupt as exc:  # SIGTERM/SIGUSR1 via strikecast.pipeline.interrupt (C21)
         mark = getattr(store, "interrupt_stage", None)
         if mark is not None:
             mark(key, IMPORTANCE_STAGE, str(exc) or type(exc).__name__)
+        if owns_tracker:
+            track(tracker, "finish", "failed")
         raise
     except Exception as exc:
         store.fail_stage(key, IMPORTANCE_STAGE, f"{type(exc).__name__}: {exc}")
+        if owns_tracker:
+            track(tracker, "finish", "failed")
         raise
+    else:
+        if owns_tracker:
+            track(tracker, "finish")
     logger.info("%s: %d rows in %.1f s -> %s", key.relative(), len(frame), seconds, path)
     return ImportanceOutcome(key, digest, False, path, len(frame), seconds, labels)
 
@@ -306,8 +508,9 @@ def _gbdt(
     params: dict[str, Any],
     permutation: bool,
     n_repeats: int,
-    n_jobs: int | None,
+    n_jobs: int,
     random_state: int,
+    tracker: Any = None,
 ) -> tuple[Path, pd.DataFrame, list[str], dict[str, Any]]:
     from strikecast.backtest.grouping import partition, take  # noqa: PLC0415
     from strikecast.evaluation.importance import (  # noqa: PLC0415
@@ -325,9 +528,10 @@ def _gbdt(
     frames: list[pd.DataFrame] = []
     labels: list[str] = []
     timings: dict[str, Any] = {}
-    for group in groups:
+    progress = _Progress(tracker, len(groups), n_jobs)
+    for index, group in enumerate(groups, start=1):
         label = group_label(paradigm, group.label, model_name)
-        logger.info("importance %s (%d regions)", label, len(group.indices))
+        progress.group(index, label, len(group.indices))
         ts = [targets[i] for i in group.indices]
         pc = take(past, group.indices)
         fc = take(future, group.indices)
@@ -335,6 +539,7 @@ def _gbdt(
         model = spec.build(params, ctx)
         model.fit(series=ts, past_covariates=pc, future_covariates=fc)
         fit_s = time.perf_counter() - t0
+        progress.fitted(fit_s)
         group_timings: dict[str, float] = {"fit_s": fit_s}
         frame = gbm_importances(
             model,
@@ -347,6 +552,7 @@ def _gbdt(
             random_state=random_state,
             n_jobs=n_jobs,
             timings=group_timings,
+            progress=progress,
         )
         frame["model"] = label
         frames.append(frame)

@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -236,6 +236,7 @@ def gbm_importances(
     random_state: int = 42,
     n_jobs: int | None = -1,
     timings: dict[str, float] | None = None,
+    progress: Callable[[str, Mapping[str, float]], None] | None = None,
 ) -> pd.DataFrame:
     """``get_gbm_importances`` (``_regression_GBDT.ipynb`` cell 57).
 
@@ -245,6 +246,12 @@ def gbm_importances(
     columns with NaN (``agg_perm`` then NaN and the sort falls back to
     ``agg_gain``); it is a test/benchmark affordance, never the thesis output.
     ``timings`` (optional) receives ``gain_s``, ``design_s`` and ``perm_s``.
+
+    ``progress`` (optional) is told what the permutation half is doing, so a
+    caller can log it; it never changes a value. It is called as
+    ``progress("design", {"rows", "features", "seconds"})`` once the lagged
+    design matrix is built, then ``progress("horizon", {"horizon",
+    "n_horizons", "seconds"})`` after each horizon's ``permutation_importance``.
     """
     import time  # noqa: PLC0415
 
@@ -267,12 +274,24 @@ def gbm_importances(
                 f"{len(features)} lagged feature names"
             )
         t2 = time.perf_counter()
+        if progress is not None:
+            progress("design", {"rows": X.shape[0], "features": X.shape[1], "seconds": t2 - t1})
         for h, est in enumerate(estimators, start=1):
+            th = time.perf_counter()
             y_h = y[:, h - 1]
             result = permutation_importance(
                 est, X, y_h, n_repeats=n_repeats, random_state=random_state, n_jobs=n_jobs
             )
             frame[f"h{h}{PERM_SUFFIX}"] = result.importances_mean
+            if progress is not None:
+                progress(
+                    "horizon",
+                    {
+                        "horizon": h,
+                        "n_horizons": len(estimators),
+                        "seconds": time.perf_counter() - th,
+                    },
+                )
         t3 = time.perf_counter()
     else:
         t2 = t3 = time.perf_counter()

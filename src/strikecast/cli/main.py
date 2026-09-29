@@ -153,8 +153,9 @@ def _parser() -> argparse.ArgumentParser:
         "--n-jobs",
         type=int,
         default=-1,
-        help="importance: joblib workers for sklearn permutation_importance "
-        "(legacy -1; it never changes a value)",
+        help="importance: joblib workers for sklearn permutation_importance; "
+        "-1 (default) = as many as fit next to the model's own threads on the "
+        "CPUs this job has (1 for count on -c 16); it never changes a value",
     )
     parser.add_argument(
         "--source",

@@ -47,9 +47,18 @@ What each stage logs:
 - **Chronos-2 and composite (hurdle) stages**: start/finish, tables and the two
   artifacts, but no per-fold curve (`pipeline/chronos_stage.py:502-574`,
   `pipeline/composite_stage.py:770-859`).
+- **importance** (`pipeline/importance_stage.py`, `run_importance` / `_Progress`), job_type
+  `importance`: for a GBDT run one point per group when its design matrix is built
+  (`importance/group_index`, `importance/n_groups`, `importance/design_rows`,
+  `importance/design_features`, `importance/n_jobs`) and one per finished horizon
+  (`importance/horizon`, `importance/horizon_seconds`, `importance/elapsed_seconds`,
+  `importance/progress_frac`, `importance/eta_seconds`), step = horizons done over all
+  groups (so the logged `fold` is that counter too); at the end the `importance/` directory
+  as an `artifacts` artifact. Chronos-2 importance: start/finish and the artifact only. The
+  same progress is in the job log as INFO lines.
 - W&B itself adds system metrics (CPU/GPU), console output and the git commit.
 
-**Not logged:** `featsel`, `importance`, `evaluate`, `report`, `verify`; model
+**Not logged:** `featsel`, `evaluate`, `report`, `verify`; model
 weights; the tune stage's `best_params.json` / `trials.csv` (they stay in
 `tuning/<model>/` of the store). Runs finish as W&B state *finished* or *failed*
 (`wandb_tracker.py:52`, `:236-247`); a job that is SIGKILLed shows as *crashed*.

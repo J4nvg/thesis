@@ -220,12 +220,12 @@ def test_the_stored_csv_has_the_same_column_order() -> None:
     assert header == [*imp.importance_columns(7), "model"]
 
 
-def test_n_jobs_never_changes_a_value(data) -> None:
+def test_n_jobs_never_changes_a_value(fitted, data) -> None:
+    """LightGBM and CatBoost: sequential and loky workers give the same bits."""
+    family, model = fitted
     targets, past, future = data
-    model = _lightgbm()
-    model.fit(series=targets, past_covariates=past, future_covariates=future)
-    a = imp.gbm_importances(model, "lightgbm", targets, past, future, n_jobs=1)
-    b = imp.gbm_importances(model, "lightgbm", targets, past, future, n_jobs=2)
+    a = imp.gbm_importances(model, family, targets, past, future, n_jobs=1)
+    b = imp.gbm_importances(model, family, targets, past, future, n_jobs=2)
     pd.testing.assert_frame_equal(a, b, check_exact=True)
 
 
@@ -600,3 +600,110 @@ def test_the_cli_knows_the_importance_command() -> None:
         ["importance", "experiment=count", "--no-permutation", "--n-jobs", "4"]
     )
     assert args.no_permutation and args.n_jobs == 4
+
+
+# --------------------------------------------------------------------------- #
+# 6. parallelism and progress (never a value; cluster 2026-09-29)
+# --------------------------------------------------------------------------- #
+def test_permutation_workers_fit_next_to_the_model_threads() -> None:
+    from strikecast.pipeline.importance_stage import permutation_workers
+
+    # count on a 16-CPU SLURM job: 12 CatBoost threads leave room for ONE worker
+    # (it used to be 12 workers x 12 threads = 144 threads on 16 CPUs)
+    assert permutation_workers(-1, threads=12, cpus=16) == 1
+    assert permutation_workers(None, threads=12, cpus=16) == 1
+    assert permutation_workers(0, threads=12, cpus=16) == 1
+    assert permutation_workers(-1, threads=12, cpus=64) == 5
+    assert permutation_workers(-1, threads=4, cpus=16) == 4
+    assert permutation_workers(-1, threads=1, cpus=8) == 8
+    assert permutation_workers(-1, threads=24, cpus=16) == 1  # more threads than CPUs
+    assert permutation_workers(-1, threads=None, cpus=16) == 1  # unpinned = every CPU
+    # an explicit positive n_jobs always wins
+    assert permutation_workers(4, threads=12, cpus=16) == 4
+    assert permutation_workers(1, threads=None, cpus=64) == 1
+    assert permutation_workers(32, threads=12, cpus=16) == 32
+
+
+def test_available_cpus_prefers_the_affinity_then_slurm(monkeypatch) -> None:
+    from strikecast.pipeline import importance_stage as stage
+
+    monkeypatch.setattr(stage.os, "sched_getaffinity", lambda pid: set(range(16)), raising=False)
+    monkeypatch.setenv("SLURM_CPUS_PER_TASK", "8")
+    assert stage.available_cpus() == (16, "sched_getaffinity")
+
+    monkeypatch.delattr(stage.os, "sched_getaffinity", raising=False)  # macOS
+    assert stage.available_cpus() == (8, "SLURM_CPUS_PER_TASK")
+
+    monkeypatch.delenv("SLURM_CPUS_PER_TASK")
+    monkeypatch.setattr(stage.os, "cpu_count", lambda: 10)
+    assert stage.available_cpus() == (10, "os.cpu_count")
+
+
+def test_model_threads_follow_the_builder(count_cfg) -> None:
+    from strikecast.config.loader import load_experiment
+    from strikecast.models import get_spec
+    from strikecast.pipeline.importance_stage import model_threads
+
+    # every count GBDT pins cfg.threads (12 on the cluster)
+    spec = get_spec("catboost_tweedie", "count")
+    assert model_threads(count_cfg, spec, "catboost_tweedie") == count_cfg.resolved_threads
+    # diff: LightGBM pins 4 threads; GPU XGBoost/CatBoost use the library default
+    diff = load_experiment("diff", ["tracking=noop"])
+    assert model_threads(diff, get_spec("lightgbm", "diff"), "lightgbm") == 4
+    assert model_threads(diff, get_spec("xgboost", "diff"), "xgboost") is None
+    assert model_threads(diff, get_spec("catboost", "diff"), "catboost") is None
+
+
+def test_progress_reports_design_then_every_horizon(data) -> None:
+    targets, past, future = data
+    model = _lightgbm()
+    model.fit(series=targets, past_covariates=past, future_covariates=future)
+    events: list[tuple[str, dict]] = []
+    got = imp.gbm_importances(model, "lightgbm", targets, past, future, n_jobs=1,
+                              progress=lambda event, info: events.append((event, dict(info))))
+    silent = imp.gbm_importances(model, "lightgbm", targets, past, future, n_jobs=1)
+    pd.testing.assert_frame_equal(got, silent, check_exact=True)
+    assert [e for e, _ in events] == ["design", *["horizon"] * OCL]
+    design = events[0][1]
+    assert design["features"] == len(model.lagged_feature_names) and design["rows"] > 0
+    assert [info["horizon"] for _, info in events[1:]] == list(range(1, OCL + 1))
+    assert all(info["n_horizons"] == OCL and info["seconds"] >= 0 for _, info in events[1:])
+
+
+def test_the_stage_records_parallelism_and_mirrors_progress(
+    monkeypatch, data, count_cfg, tmp_path
+) -> None:
+    from strikecast.pipeline import importance_stage as stage
+    from strikecast.pipeline.context import NoopTracker
+    from strikecast.store import RunStore
+
+    class Recorder(NoopTracker):
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def start(self, run_key, config, tags=(), *, stage="run"):
+            self.calls.append(("start", stage))
+            return None
+
+        def log_fold(self, step, metrics):
+            self.calls.append(("log_fold", step, dict(metrics)))
+
+        def finish(self, status="success"):
+            self.calls.append(("finish", status))
+
+    art = _fake_gbdt_setup(monkeypatch, data)
+    tracker = Recorder()
+    out = stage.run_importance(count_cfg, "lightgbm_poisson", "activity", 42, art,
+                               store=RunStore(tmp_path / "runs"), tracker=tracker)
+    timings = json.loads((out.path.parent / "timings.json").read_text())
+    # the fake spec pins no threads -> treated as using every CPU -> one worker
+    assert timings["n_jobs"] == 1 and timings["n_jobs_requested"] == -1
+    assert timings["model_threads"] is None and timings["cpus_available"] >= 1
+    assert tracker.calls[0] == ("start", "importance")
+    assert ("finish", "success") not in tracker.calls  # a passed-in tracker is the caller's
+    horizons = [c for c in tracker.calls if c[0] == "log_fold" and "importance/horizon" in c[2]]
+    assert [c[1] for c in horizons] == list(range(1, 2 * OCL + 1))  # 2 tiers x OCL horizons
+    assert horizons[-1][2]["importance/progress_frac"] == 1.0
+    assert horizons[-1][2]["importance/eta_seconds"] == 0.0
+    designs = [c for c in tracker.calls if c[0] == "log_fold" and "importance/design_rows" in c[2]]
+    assert [c[2]["importance/group_index"] for c in designs] == [1, 2]

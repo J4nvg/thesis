@@ -1342,3 +1342,26 @@ Pilot (`--benchmark`, runs_benchmark) completed; `configs/cluster/time_table.jso
   cancelled); `status` merges all manifests of a store; `--dry-run` respects the queue.
 Still to check at the end: `report:count`/`figures` may run before the resubmitted xgboost_tweedie
 tests finish -> rerun `--stages report,figures --force` if the count leaderboard lacks it.
+
+### Importance parallelism + progress — 2026-09-29
+
+Cluster symptom: `importance:count:catboost_tweedie:global` and `:activity` ran 11+ h without
+finishing their first group. Cause: `run_importance` turned the default `n_jobs=-1` into
+`cfg.resolved_threads` = 12 loky workers for `permutation_importance`, each running a CatBoost
+built with `thread_count=12` -> ~144 threads on the 16 CPUs of the job (`-c 16`).
+- `importance_stage.permutation_workers`: `-1`/`None` now means `max(1, cpus // model threads)`,
+  cpus from `os.sched_getaffinity` (the SLURM cpuset), else `SLURM_CPUS_PER_TASK`, else
+  `os.cpu_count()`; model threads = `cfg.resolved_threads` where the builder pins threads
+  (`spec.threads_from_context`), unpinned/GPU models count as using every CPU -> 1 worker. Count on
+  `-c 16` -> 1 worker. An explicit `--n-jobs N` still wins. Values unchanged (sklearn draws the
+  permutation seeds up front; `n_jobs` stays out of the stage hash); the n_jobs identity test now
+  covers CatBoost as well as LightGBM. `timings.json` records `n_jobs`, `n_jobs_requested`,
+  `cpus_available`, `cpus_source`, `model_threads`, `cpu_count`.
+- Progress: INFO lines per group (i/n, regions, fit time, design matrix rows x features) and per
+  horizon (h/7, seconds, elapsed, ETA = horizons left x mean horizon time), via a `progress`
+  callback of `gbm_importances` (the evaluation module stays tracker-free). The stage now starts
+  its own tracker run (job_type `importance`) and mirrors the same numbers as `importance/*`
+  metrics through `log_fold` (step = horizons done), plus the `importance/` dir as an artifact;
+  `docs/WANDB.md` updated. As for cv/test, a re-run resumes the same W&B run, so its early steps
+  are dropped by W&B until they pass the old step (the log lines are unaffected).
+- TIME_TABLE `importance` stays 16 h (no clean timing yet); the killed jobs need a resubmit.

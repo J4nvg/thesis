@@ -175,7 +175,7 @@ TIME_TABLE: dict[str, dict[str, Any]] = {
     "test/composite/cpu/activity": {"hours": 16, "evidence": "3 groups"},
     "test/composite/cpu/local": {"hours": 28, "evidence": "20 regions; no evidence -- first pilot candidate"},
     "test/chronos/gpu": {"hours": 4, "evidence": "(b) zero-shot fit 100 s, ~2 s/fold; fine-tune 636 s at 1500 steps"},
-    "importance": {"hours": 16, "evidence": "C14: GBDT permutation 5 repeats x 7 horizons x ~500 features, 2-10 h"},
+    "importance": {"hours": 16, "evidence": "C14: GBDT permutation 5 repeats x 7 horizons x ~500 features, 2-10 h; 2026-09-29: 12 workers x 12 CatBoost threads on -c 16 did not finish a group in 11 h, now 1 worker (timings.json has the real figure)"},
     "report": {"hours": 2, "evidence": "diff report ~4 s; pairwise work grows with runs^2 (count ~1275 pairs)"},
     "figures": {"hours": 2, "evidence": "C1: < 1 h"},
     "verify_prep": {"hours": 4, "evidence": "golden param import + hurdle legacy featsel (two LightGBM fits)"},
