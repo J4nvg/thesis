@@ -1,0 +1,6 @@
+A thesis scoring  RMSE medians 1.858 1.855 1.848 1.869 1.880 1.892 1.880  | Holm-significant: h5 vs h4 (+0.73%, p=0.005), h6 vs h5 (+0.32%, p=0.005), h6 vs h1 (+1.50%, p=0.033)
+A thesis scoring  MAE  medians 0.783 0.776 0.780 0.781 0.786 0.786 0.788  | Holm-significant: h5 vs h4 (+0.59%, p=0.009)
+B same dates      RMSE medians 1.873 1.850 1.849 1.866 1.852 1.860 1.850  | Holm-significant: h2 vs h1 (-0.85%, p=0.028), h5 vs h4 (-0.60%, p=0.005), h6 vs h5 (+0.31%, p=0.014), h3 vs h1 (-0.98%, p=0.028)
+B same dates      MAE  medians 0.786 0.777 0.781 0.782 0.781 0.782 0.782  | Holm-significant: h2 vs h1 (-0.58%, p=0.013), h3 vs h1 (-0.78%, p=0.042)
+wrote horizon_boxplots_AvsB.png/.svg
+wrote horizon_boxplots_B.png/.svg
