@@ -1,0 +1,273 @@
+
+====================================================================================================
+[E0] Environment
+====================================================================================================
+scipy 1.17.1, statsmodels 0.14.6, scikit-posthocs 0.17.0, pandas 3.0.2, numpy 2.4.4
+
+====================================================================================================
+[E1] Input: the top-20 configurations (master_leaderboard.csv rows 1-20) and their files
+====================================================================================================
+   Modelname  paradigm                model      rmse       mae                                                                                                file
+0   chronos2     local  chronos2_fine_tuned  1.835871  0.714065  runs_publication_20260929/chronos2/chronos2_fine_tuned/global/seed=42/test/metrics/per_horizon.csv
+1       gbdt    global     catboost_tweedie  1.844650  0.781360        runs_publication_20260929/count/catboost_tweedie/global/seed=42/test/metrics/per_horizon.csv
+2   chronos2     local   chronos2_zero_shot  1.849340  0.719449   runs_publication_20260929/chronos2/chronos2_zero_shot/global/seed=42/test/metrics/per_horizon.csv
+3       gbdt    global     lightgbm_poisson  1.851481  0.787105        runs_publication_20260929/count/lightgbm_poisson/global/seed=42/test/metrics/per_horizon.csv
+4       diff    global                arima  1.853493  0.813287                    runs_publication_20260929/diff/arima/global/seed=42/test/metrics/per_horizon.csv
+5       lstm    global      gru_poisson_w28  1.864177  0.792181         runs_publication_20260929/count/gru_poisson_w28/global/seed=42/test/metrics/per_horizon.csv
+6       gbdt  activity     lightgbm_poisson  1.865992  0.775003      runs_publication_20260929/count/lightgbm_poisson/activity/seed=42/test/metrics/per_horizon.csv
+7       lstm  activity     lstm_poisson_w14  1.866448  0.776468      runs_publication_20260929/count/lstm_poisson_w14/activity/seed=42/test/metrics/per_horizon.csv
+8       gbdt    global      xgboost_poisson  1.867216  0.785436         runs_publication_20260929/count/xgboost_poisson/global/seed=42/test/metrics/per_horizon.csv
+9       gbdt  activity      xgboost_poisson  1.867746  0.772311       runs_publication_20260929/count/xgboost_poisson/activity/seed=42/test/metrics/per_horizon.csv
+10      gbdt  activity     catboost_tweedie  1.867942  0.763083      runs_publication_20260929/count/catboost_tweedie/activity/seed=42/test/metrics/per_horizon.csv
+11      gbdt  activity     catboost_poisson  1.871099  0.768238      runs_publication_20260929/count/catboost_poisson/activity/seed=42/test/metrics/per_horizon.csv
+12      lstm  activity      gru_poisson_w28  1.873539  0.779888       runs_publication_20260929/count/gru_poisson_w28/activity/seed=42/test/metrics/per_horizon.csv
+13      lstm    global      gru_tweedie_w14  1.874712  0.793187         runs_publication_20260929/count/gru_tweedie_w14/global/seed=42/test/metrics/per_horizon.csv
+14      diff    global               linear  1.879005  0.865001                   runs_publication_20260929/diff/linear/global/seed=42/test/metrics/per_horizon.csv
+15      gbdt    global     lightgbm_tweedie  1.880571  0.784231        runs_publication_20260929/count/lightgbm_tweedie/global/seed=42/test/metrics/per_horizon.csv
+16      gbdt  activity     lightgbm_tweedie  1.881392  0.765331      runs_publication_20260929/count/lightgbm_tweedie/activity/seed=42/test/metrics/per_horizon.csv
+17      gbdt    global      xgboost_tweedie  1.883177  0.785816         runs_publication_20260929/count/xgboost_tweedie/global/seed=42/test/metrics/per_horizon.csv
+18      lstm    global     lstm_poisson_w28  1.884612  0.799751        runs_publication_20260929/count/lstm_poisson_w28/global/seed=42/test/metrics/per_horizon.csv
+19      gbdt    global     catboost_poisson  1.887896  0.794326        runs_publication_20260929/count/catboost_poisson/global/seed=42/test/metrics/per_horizon.csv
+
+====================================================================================================
+[E2-RMSE] Input matrix: RMSE per configuration (rows) and horizon (cols)
+====================================================================================================
+horizon                         1       2       3       4       5       6       7
+chronos2_fine_tuned@local  1.8136  1.8282  1.8172  1.8317  1.8435  1.8560  1.8603
+catboost_tweedie@global    1.8503  1.8261  1.8440  1.8384  1.8416  1.8531  1.8589
+chronos2_zero_shot@local   1.8296  1.8239  1.8305  1.8419  1.8659  1.8726  1.8802
+lightgbm_poisson@global    1.8216  1.8290  1.8247  1.8559  1.8725  1.8929  1.8626
+arima@global               1.8453  1.8614  1.8444  1.8751  1.8505  1.8557  1.8417
+gru_poisson_w28@global     1.8332  1.8509  1.8564  1.8690  1.8812  1.8779  1.8802
+lightgbm_poisson@activity  1.8665  1.8475  1.8488  1.8712  1.8782  1.8923  1.8570
+lstm_poisson_w14@activity  1.8195  1.8366  1.8706  1.8488  1.8816  1.8980  1.9083
+xgboost_poisson@global     1.8789  1.8422  1.8440  1.8521  1.8711  1.9010  1.8804
+xgboost_poisson@activity   1.8699  1.8388  1.8468  1.8693  1.8849  1.8860  1.8780
+catboost_tweedie@activity  1.8916  1.8591  1.8382  1.8564  1.8726  1.8950  1.8621
+catboost_poisson@activity  1.9081  1.8726  1.8445  1.8619  1.8681  1.8676  1.8743
+gru_poisson_w28@activity   1.8403  1.8605  1.8624  1.8751  1.8888  1.8928  1.8941
+gru_tweedie_w14@global     1.8485  1.8742  1.8708  1.8728  1.8865  1.8869  1.8830
+linear@global              1.8756  1.8931  1.8959  1.8727  1.8816  1.8909  1.8427
+lightgbm_tweedie@global    1.8740  1.8496  1.8697  1.8819  1.8875  1.9120  1.8887
+lightgbm_tweedie@activity  1.9012  1.8687  1.8409  1.8728  1.8974  1.8994  1.8886
+xgboost_tweedie@global     1.8674  1.8733  1.8666  1.8767  1.9036  1.8977  1.8965
+lstm_poisson_w28@global    1.8444  1.8655  1.8697  1.8851  1.9069  1.9098  1.9098
+catboost_poisson@global    1.9394  1.8992  1.8683  1.8629  1.8741  1.8790  1.8914
+
+column mean: h1=1.8610  h2=1.8550  h3=1.8527  h4=1.8636  h5=1.8769  h6=1.8858  h7=1.8769
+range of column means: 1.8527 .. 1.8858 (spread 1.79% of the minimum)
+mean(h1-h4) = 1.8581, mean(h5-h7) = 1.8799
+
+====================================================================================================
+[E3-RMSE] CURRENT test (compute.py::horizon_statistics), recomputed; vs tab_horizon_stats.csv
+====================================================================================================
+Shapiro-Wilk p per horizon: h1=0.5530  h2=0.5098  h3=0.5244  h4=0.1823  h5=0.4042  h6=0.1415  h7=0.5978
+Levene p = 0.0106  -> variance_passed = False
+one-way ANOVA F(6,133) = 7.124, p = 1.34e-06
+Kruskal-Wallis H(6) = 37.238, p = 1.58e-06
+stored in tab_horizon_stats.csv: levene_p=0.0106, anova_F=7.124, kruskal_H=37.238, kruskal_p=1.58e-06, test=kruskal
+
+====================================================================================================
+[E4-RMSE] Why pairing matters: two-way sum-of-squares decomposition of the 20 x 7 matrix
+====================================================================================================
+SS_total=0.077794  SS_between_configurations=0.027075 (34.8%)  SS_between_horizons=0.018920 (24.3%)  SS_residual=0.031798 (40.9%)
+An unpaired test compares SS_between_horizons against SS_between_configurations + SS_residual;
+a paired (repeated-measures) test compares it against SS_residual only.
+
+====================================================================================================
+[E5-RMSE] PROPOSED omnibus tests (paired; blocks = 20 configurations, treatments = 7 horizons)
+====================================================================================================
+Friedman chi2(6) = 48.043, p = 1.16e-08
+Kendall's W = chi2 / (N (k-1)) = 48.043 / 120 = 0.400
+Kendall's W from its definition 12S/(N^2(k^3-k)) = 0.400  (identical: True; no ties within a configuration, so no tie correction applies)
+Iman-Davenport F(6,114) = 12.686, p = 6.32e-11  (Demsar 2006, p. 11)
+Page's L = 2535.0, p = 3.95e-09, method = asymptotic  (H1: h1 <= h2 <= ... <= h7)
+mean Friedman rank per horizon (1 = lowest error): h1=3.25  h2=2.75  h3=2.45  h4=3.40  h5=5.00  h6=6.00  h7=5.15
+
+====================================================================================================
+[E6-RMSE] PROPOSED post-hoc: Wilcoxon signed-rank, each horizon vs Day 1 and vs previous day, Holm
+====================================================================================================
+comparison configs_worse  median_pct_change  W     p_raw   p_holm  reject_0.05
+  h2 vs h1         10/20                  0 70    0.2024   0.8098        False
+  h3 vs h1          9/20              -0.05 84    0.4524        1        False
+  h4 vs h1         12/20               0.46 85    0.4749        1        False
+  h5 vs h1         14/20               0.76 53   0.05317   0.3722        False
+  h6 vs h1         17/20                1.5 30  0.003654  0.03289         True
+  h7 vs h1         13/20               0.62 59   0.08969   0.5382        False
+  h3 vs h2         11/20               0.08 93    0.6742        1        False
+  h4 vs h3         16/20               0.68 36  0.008308  0.06647        False
+  h5 vs h4         19/20               0.73 18 0.0004826 0.005308         True
+  h6 vs h5         17/20               0.32 18 0.0004826 0.005308         True
+  h7 vs h6          8/20              -0.14 60   0.09731   0.5382        False
+
+====================================================================================================
+[E7-RMSE] PROPOSED optional: Nemenyi post-hoc on the Friedman ranks (p-value matrix)
+====================================================================================================
+q_0.05 = 2.948, CD = 2.014 (mean ranks further apart than CD differ)
+       h1     h2     h3     h4     h5     h6     h7
+h1  1.000  0.991  0.905  1.000  0.138  0.001  0.079
+h2  0.991  1.000  0.999  0.964  0.017  0.000  0.008
+h3  0.905  0.999  1.000  0.807  0.004  0.000  0.002
+h4  1.000  0.964  0.807  1.000  0.224  0.003  0.138
+h5  0.138  0.017  0.004  0.224  1.000  0.766  1.000
+h6  0.001  0.000  0.000  0.003  0.766  1.000  0.877
+h7  0.079  0.008  0.002  0.138  1.000  0.877  1.000
+significant pairs: h1-h6, h2-h5, h2-h6, h2-h7, h3-h5, h3-h6, h3-h7, h4-h6
+
+====================================================================================================
+[E8-RMSE] For comparison only: unpaired Tukey HSD on the same data
+====================================================================================================
+ group1  group2  meandiff  p-adj   lower  upper  reject
+      1       2   -0.0059 0.9734 -0.0258 0.0140   False
+      1       3   -0.0082 0.8778 -0.0282 0.0117   False
+      1       4    0.0026 0.9997 -0.0173 0.0225   False
+      1       5    0.0160 0.2078 -0.0040 0.0359   False
+      1       6    0.0249 0.0050  0.0050 0.0448    True
+      1       7    0.0160 0.2054 -0.0039 0.0359   False
+      2       3   -0.0023 0.9999 -0.0222 0.0176   False
+      2       4    0.0085 0.8577 -0.0114 0.0285   False
+      2       5    0.0219 0.0214  0.0020 0.0418    True
+      2       6    0.0308 0.0002  0.0109 0.0507    True
+      2       7    0.0219 0.0211  0.0020 0.0418    True
+      3       4    0.0109 0.6613 -0.0091 0.0308   False
+      3       5    0.0242 0.0071  0.0043 0.0441    True
+      3       6    0.0331 0.0000  0.0132 0.0530    True
+      3       7    0.0242 0.0069  0.0043 0.0441    True
+      4       5    0.0133 0.4176 -0.0066 0.0332   False
+      4       6    0.0223 0.0180  0.0023 0.0422    True
+      4       7    0.0134 0.4140 -0.0066 0.0333   False
+      5       6    0.0089 0.8311 -0.0110 0.0288   False
+      5       7    0.0000 1.0000 -0.0199 0.0200   False
+      6       7   -0.0089 0.8339 -0.0288 0.0110   False
+significant pairs: h1-h6, h2-h5, h2-h6, h2-h7, h3-h5, h3-h6, h3-h7, h4-h6
+same significant pairs as Nemenyi (E7): True
+
+====================================================================================================
+[E2-MAE] Input matrix: MAE per configuration (rows) and horizon (cols)
+====================================================================================================
+horizon                         1       2       3       4       5       6       7
+chronos2_fine_tuned@local  0.7042  0.7121  0.7147  0.7153  0.7155  0.7165  0.7202
+catboost_tweedie@global    0.7833  0.7756  0.7794  0.7753  0.7850  0.7840  0.7869
+chronos2_zero_shot@local   0.7146  0.7134  0.7158  0.7215  0.7223  0.7229  0.7256
+lightgbm_poisson@global    0.7834  0.7807  0.7843  0.7880  0.7910  0.7910  0.7913
+arima@global               0.8149  0.8171  0.8141  0.8162  0.8126  0.8106  0.8076
+gru_poisson_w28@global     0.7925  0.7920  0.7921  0.7957  0.7936  0.7905  0.7889
+lightgbm_poisson@activity  0.7829  0.7719  0.7718  0.7706  0.7763  0.7745  0.7770
+lstm_poisson_w14@activity  0.7619  0.7668  0.7753  0.7739  0.7805  0.7863  0.7903
+xgboost_poisson@global     0.7889  0.7758  0.7818  0.7821  0.7863  0.7884  0.7947
+xgboost_poisson@activity   0.7786  0.7639  0.7686  0.7716  0.7767  0.7699  0.7768
+catboost_tweedie@activity  0.7723  0.7592  0.7535  0.7600  0.7653  0.7702  0.7610
+catboost_poisson@activity  0.7749  0.7660  0.7640  0.7653  0.7672  0.7681  0.7722
+gru_poisson_w28@activity   0.7713  0.7767  0.7783  0.7801  0.7830  0.7848  0.7850
+gru_tweedie_w14@global     0.7924  0.7946  0.7933  0.7920  0.7951  0.7945  0.7904
+linear@global              0.8565  0.8589  0.8538  0.8744  0.8708  0.8776  0.8630
+lightgbm_tweedie@global    0.7865  0.7775  0.7810  0.7813  0.7903  0.7858  0.7871
+lightgbm_tweedie@activity  0.7789  0.7614  0.7584  0.7623  0.7671  0.7689  0.7604
+xgboost_tweedie@global     0.7856  0.7846  0.7816  0.7810  0.7918  0.7869  0.7892
+lstm_poisson_w28@global    0.7957  0.7984  0.8002  0.7987  0.8040  0.8007  0.8006
+catboost_poisson@global    0.8025  0.7985  0.7926  0.7859  0.7927  0.7912  0.7968
+
+column mean: h1=0.7811  h2=0.7773  h3=0.7777  h4=0.7796  h5=0.7834  h6=0.7832  h7=0.7833
+range of column means: 0.7773 .. 0.7834 (spread 0.79% of the minimum)
+mean(h1-h4) = 0.7789, mean(h5-h7) = 0.7833
+
+====================================================================================================
+[E3-MAE] CURRENT test (compute.py::horizon_statistics), recomputed; vs tab_horizon_stats.csv
+====================================================================================================
+Shapiro-Wilk p per horizon: h1=0.0082  h2=0.0637  h3=0.0883  h4=0.0150  h5=0.0110  h6=0.0026  h7=0.0118
+Levene p = 0.9999  -> variance_passed = True
+one-way ANOVA F(6,133) = 0.143, p = 0.99
+Kruskal-Wallis H(6) = 3.197, p = 0.784
+stored in tab_horizon_stats.csv: levene_p=0.9999, anova_F=0.143, kruskal_H=3.197, kruskal_p=0.784, test=kruskal
+
+====================================================================================================
+[E4-MAE] Why pairing matters: two-way sum-of-squares decomposition of the 20 x 7 matrix
+====================================================================================================
+SS_total=0.130354  SS_between_configurations=0.126858 (97.3%)  SS_between_horizons=0.000835 (0.6%)  SS_residual=0.002661 (2.0%)
+An unpaired test compares SS_between_horizons against SS_between_configurations + SS_residual;
+a paired (repeated-measures) test compares it against SS_residual only.
+
+====================================================================================================
+[E5-MAE] PROPOSED omnibus tests (paired; blocks = 20 configurations, treatments = 7 horizons)
+====================================================================================================
+Friedman chi2(6) = 33.086, p = 1.01e-05
+Kendall's W = chi2 / (N (k-1)) = 33.086 / 120 = 0.276
+Kendall's W from its definition 12S/(N^2(k^3-k)) = 0.276  (identical: True; no ties within a configuration, so no tie correction applies)
+Iman-Davenport F(6,114) = 7.233, p = 1.47e-06  (Demsar 2006, p. 11)
+Page's L = 2432.0, p = 8.64e-05, method = asymptotic  (H1: h1 <= h2 <= ... <= h7)
+mean Friedman rank per horizon (1 = lowest error): h1=4.20  h2=2.70  h3=2.60  h4=3.30  h5=5.30  h6=4.80  h7=5.10
+
+====================================================================================================
+[E6-MAE] PROPOSED post-hoc: Wilcoxon signed-rank, each horizon vs Day 1 and vs previous day, Holm
+====================================================================================================
+comparison configs_worse  median_pct_change  W     p_raw   p_holm  reject_0.05
+  h2 vs h1          7/20              -0.26 56   0.06958   0.6958        False
+  h3 vs h1          7/20              -0.41 65    0.1429        1        False
+  h4 vs h1          9/20              -0.31 83    0.4304        1        False
+  h5 vs h1         12/20               0.28 77    0.3118        1        False
+  h6 vs h1         10/20               0.01 90    0.5958        1        False
+  h7 vs h1         11/20               0.27 83    0.4304        1        False
+  h3 vs h2         11/20               0.11 92    0.6477        1        False
+  h4 vs h3         13/20               0.13 67     0.165        1        False
+  h5 vs h4         17/20               0.59 21 0.0008507 0.009357         True
+  h6 vs h5          9/20              -0.04 98    0.8124        1        False
+  h7 vs h6         13/20               0.23 87    0.5217        1        False
+
+====================================================================================================
+[E7-MAE] PROPOSED optional: Nemenyi post-hoc on the Friedman ranks (p-value matrix)
+====================================================================================================
+q_0.05 = 2.948, CD = 2.014 (mean ranks further apart than CD differ)
+       h1     h2     h3     h4     h5     h6     h7
+h1  1.000  0.298  0.224  0.844  0.676  0.976  0.844
+h2  0.298  1.000  1.000  0.976  0.003  0.034  0.008
+h3  0.224  1.000  1.000  0.948  0.002  0.022  0.005
+h4  0.844  0.976  0.948  1.000  0.053  0.298  0.116
+h5  0.676  0.003  0.002  0.053  1.000  0.991  1.000
+h6  0.976  0.034  0.022  0.298  0.991  1.000  0.999
+h7  0.844  0.008  0.005  0.116  1.000  0.999  1.000
+significant pairs: h2-h5, h2-h6, h2-h7, h3-h5, h3-h6, h3-h7
+
+====================================================================================================
+[E8-MAE] For comparison only: unpaired Tukey HSD on the same data
+====================================================================================================
+ group1  group2  meandiff  p-adj   lower  upper  reject
+      1       2   -0.0038 0.9997 -0.0334 0.0257   False
+      1       3   -0.0034 0.9999 -0.0329 0.0262   False
+      1       4   -0.0015 1.0000 -0.0311 0.0280   False
+      1       5    0.0023 1.0000 -0.0273 0.0318   False
+      1       6    0.0021 1.0000 -0.0275 0.0316   False
+      1       7    0.0022 1.0000 -0.0274 0.0317   False
+      2       3    0.0005 1.0000 -0.0291 0.0300   False
+      2       4    0.0023 1.0000 -0.0272 0.0319   False
+      2       5    0.0061 0.9961 -0.0234 0.0356   False
+      2       6    0.0059 0.9967 -0.0236 0.0355   False
+      2       7    0.0060 0.9964 -0.0235 0.0356   False
+      3       4    0.0018 1.0000 -0.0277 0.0314   False
+      3       5    0.0056 0.9976 -0.0239 0.0352   False
+      3       6    0.0054 0.9980 -0.0241 0.0350   False
+      3       7    0.0055 0.9978 -0.0240 0.0351   False
+      4       5    0.0038 0.9997 -0.0258 0.0333   False
+      4       6    0.0036 0.9998 -0.0260 0.0331   False
+      4       7    0.0037 0.9998 -0.0259 0.0332   False
+      5       6   -0.0002 1.0000 -0.0297 0.0294   False
+      5       7   -0.0001 1.0000 -0.0296 0.0294   False
+      6       7    0.0001 1.0000 -0.0295 0.0296   False
+significant pairs: none
+same significant pairs as Nemenyi (E7): False
+
+====================================================================================================
+[E9] Top-5 per-horizon MAE (for the Chronos-2 sentence in the results text)
+====================================================================================================
+            FT     ZS  CatBoost  LightGBM  ARIMA
+horizon                                         
+1        0.704  0.715     0.783     0.783  0.815
+2        0.712  0.713     0.776     0.781  0.817
+3        0.715  0.716     0.779     0.784  0.814
+4        0.715  0.721     0.775     0.788  0.816
+5        0.715  0.722     0.785     0.791  0.813
+6        0.716  0.723     0.784     0.791  0.811
+7        0.720  0.726     0.787     0.791  0.808
+FT lowest at every horizon: True
+gap to next-best model: [0.01, 0.001, 0.001, 0.006, 0.007, 0.006, 0.005]
+gap to CatBoost-Tweedie: [0.079, 0.063, 0.065, 0.06, 0.069, 0.068, 0.067]
+max-min over h1..h7 per model: {'FT': 0.016, 'ZS': 0.012, 'CatBoost': 0.012, 'LightGBM': 0.011, 'ARIMA': 0.01}

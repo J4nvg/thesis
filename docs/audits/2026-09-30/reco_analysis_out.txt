@@ -1,0 +1,78 @@
+rows 22960 test dates 2024-08-05 2025-01-21
+
+== A. RMSE / MAE per tier, share of pooled MSE from Sumy and from tier high ==
+        model   RMSE    MAE  RMSE_low  MAE_low  RMSE_medium  MAE_medium  RMSE_high  MAE_high  MSE share sumy  MSE share high
+   Chronos FT 1.8359 0.7142    0.2204   0.0427       0.9230      0.3141     3.2537    2.1001          0.5640          0.9422
+   Chronos ZS 1.8493 0.7195    0.2204   0.0430       0.9266      0.3123     3.2782    2.1184          0.5627          0.9427
+CatBoost-Tw G 1.8446 0.7814    0.2168   0.0795       0.8802      0.4261     3.2784    2.1881          0.5559          0.9476
+LightGBM-Po G 1.8515 0.7871    0.2170   0.0883       0.8780      0.4457     3.2915    2.1793          0.5697          0.9482
+ GRU-Po w28 G 1.8642 0.7922    0.2186   0.0931       0.8811      0.4397     3.3146    2.1923          0.5822          0.9484
+        ARIMA 1.8535 0.8136    0.2240   0.0891       0.8941      0.4564     3.2917    2.2593          0.5786          0.9462
+  Seas. naive 2.2045 0.8947    0.3052   0.0809       1.1781      0.4802     3.8883    2.5274          0.5311          0.9333
+        Naive 2.5790 1.0319    0.3056   0.0814       1.2223      0.5100     4.5846    2.9641          0.5630          0.9481
+       Hurdle 2.0573 0.9879    0.3553   0.3312       0.9350      0.6674     3.6489    2.2961          0.6196          0.9438
+
+== B. Surge days (y >= 8): pred/true ratio and mean pred, per horizon ==
+surge region-days x horizons: 703 unique (region,date): 104 regions: ['chernihiv', 'donetsk', 'kharkiv', 'sumy', 'zaporizhia']
+                  h1     h2     h3     h4     h5     h6     h7
+Chronos FT     0.498  0.519  0.521  0.512  0.504  0.507  0.502
+Chronos ZS     0.474  0.481  0.472  0.468  0.460  0.470  0.463
+CatBoost-Tw G  0.414  0.443  0.437  0.437  0.459  0.450  0.449
+LightGBM-Po G  0.473  0.466  0.465  0.438  0.463  0.435  0.470
+GRU-Po w28 G   0.468  0.464  0.457  0.451  0.455  0.460  0.465
+ARIMA          0.544  0.538  0.541  0.536  0.535  0.545  0.545
+Seas. naive    0.642  0.637  0.637  0.639  0.645  0.654  0.649
+Naive          0.501  0.467  0.431  0.396  0.414  0.474  0.649
+Hurdle         0.299  0.307  0.308  0.300  0.300  0.296  0.308
+mean y_true on surge days: 12.1
+
+== C. Within-region surge ranking (high tier): surge = region's top 10% test days; mean ROC-AUC over 6 regions ==
+                  h1     h2     h3     h4     h5     h6     h7
+Chronos FT     0.639  0.658  0.639  0.647  0.656  0.636  0.643
+Chronos ZS     0.617  0.653  0.617  0.640  0.648  0.629  0.621
+CatBoost-Tw G  0.635  0.672  0.643  0.666  0.669  0.667  0.673
+LightGBM-Po G  0.641  0.685  0.660  0.670  0.652  0.667  0.653
+GRU-Po w28 G   0.634  0.662  0.692  0.668  0.670  0.658  0.653
+ARIMA          0.587  0.606  0.584  0.574  0.593  0.584  0.603
+Seas. naive    0.605  0.613  0.612  0.611  0.620  0.622  0.620
+Naive          0.448  0.572  0.496  0.491  0.567  0.526  0.620
+Hurdle         0.587  0.621  0.602  0.635  0.631  0.645  0.634
+
+== D. Within-region occurrence (y>0) ranking, medium + high tiers, mean PR-AUC minus prevalence, h1 and h7 ==
+               medium h1  medium h4  medium h7  high h1  high h4  high h7
+Chronos FT         0.019      0.019      0.044    0.091    0.094    0.086
+Chronos ZS         0.027      0.051      0.056    0.081    0.083    0.071
+CatBoost-Tw G      0.054      0.042      0.051    0.061    0.061    0.064
+LightGBM-Po G      0.076      0.043      0.044    0.068    0.057    0.064
+GRU-Po w28 G       0.052      0.060      0.077    0.061    0.060    0.068
+ARIMA              0.015      0.018      0.038    0.041    0.041    0.036
+Seas. naive        0.035      0.035      0.034    0.046    0.047    0.048
+Naive              0.017      0.011      0.034    0.018    0.006    0.048
+Hurdle             0.076      0.034      0.036    0.041    0.056    0.071
+Hurdle prob        0.055      0.031      0.050    0.059    0.055    0.039
+
+== E. Horizon: pooled RMSE per horizon ==
+                  h1     h2     h3     h4     h5     h6     h7
+Chronos FT     1.814  1.828  1.817  1.832  1.844  1.856  1.860
+Chronos ZS     1.830  1.824  1.830  1.842  1.866  1.873  1.880
+CatBoost-Tw G  1.850  1.826  1.844  1.838  1.842  1.853  1.859
+LightGBM-Po G  1.822  1.829  1.825  1.856  1.873  1.893  1.863
+GRU-Po w28 G   1.833  1.851  1.856  1.869  1.881  1.878  1.880
+ARIMA          1.845  1.862  1.844  1.875  1.850  1.856  1.842
+Seas. naive    2.202  2.210  2.210  2.206  2.203  2.196  2.204
+Naive          2.592  2.623  2.653  2.692  2.653  2.602  2.204
+Hurdle         2.058  2.039  2.038  2.047  2.070  2.083  2.066
+
+== F. Bias (mean error) on high tier and overall ==
+Chronos FT     bias all -0.172  high -0.304  days y=0 in high +1.795  surge -5.943
+Chronos ZS     bias all -0.263  high -0.604  days y=0 in high +1.596  surge -6.416
+CatBoost-Tw G  bias all -0.168  high -0.491  days y=0 in high +2.046  surge -6.754
+LightGBM-Po G  bias all -0.173  high -0.548  days y=0 in high +2.038  surge -6.549
+GRU-Po w28 G   bias all -0.127  high -0.399  days y=0 in high +2.195  surge -6.533
+ARIMA          bias all -0.031  high -0.090  days y=0 in high +2.382  surge -5.558
+Seas. naive    bias all -0.034  high -0.110  days y=0 in high +1.908  surge -4.314
+Naive          bias all -0.022  high -0.074  days y=0 in high +2.626  surge -6.329
+Hurdle         bias all -0.143  high -1.140  days y=0 in high +1.939  surge -8.437
+
+== G. Weekday profile of y in the test set (mean over all regions) ==
+{0: 1.079, 1: 1.108, 2: 1.302, 3: 0.978, 4: 1.311, 5: 0.628, 6: 0.863}

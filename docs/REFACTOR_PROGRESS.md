@@ -1395,3 +1395,18 @@ Poisson/Tweedie, Global or Activity; Local excluded) and the best Chronos-2 vari
   `RandomState(random_seed)` for every shuffle set and 20 regions <= `subsample_size`, so stdev = 0 for 101/112
   features. Only its top ~7 exceed the largest negative importance. Not fixed; proposed as a cluster job (seed per
   shuffle set). Proposed thesis wording: `docs/audits/2026-09-29/MAIN_TEX_PROPOSED_CHANGES.md` (main.tex untouched).
+
+## Horizon analysis + future-window sensitivity rerun (prepared) — 2026-09-30
+
+- Horizon tests redone without new citations (Friedman, Wilcoxon + Holm, via Demšar): scoring each horizon
+  on its own shifted target dates confounds lead time with calendar; on the same 158 target dates no
+  family degrades with horizon. Evidence and figures: `docs/audits/2026-09-30/horizon_pipeline.py`,
+  `horizon_figure.py` (+ `_output.txt`, `horizon_*.png/svg`).
+- Count GBDT (18/18) and hurdle (3/3) Day-1 penalty traced to the origin-anchored future-covariate
+  window (`multi_models=True`, `lags_future_covariates=(2, 7)`): `docs/audits/2026-09-30/day1_trace.py`.
+- New opt-in switch `sensitivity.future_covariate_lags` (schema `SensitivityConfig`, `RunContext.future_lags`,
+  `darts_common_kwargs`; stage identity only when set; default runs and feature hashes unchanged).
+  Tests: `tests/unit/test_sensitivity.py` (8) + config/spec/pipeline/CLI/store unit tests, 383 passed.
+- Cluster job NOT yet submitted: `scripts/slurm/sensitivity_futwin.sh` (19 test jobs into
+  `runs_sensitivity_futwin/`), analysis `docs/audits/2026-09-30/futwin_rerun_analysis.py`, plan, retrieval
+  and pre-registered verdict in `docs/audits/2026-09-30/FUTWIN_RERUN.md`. Nothing committed yet.

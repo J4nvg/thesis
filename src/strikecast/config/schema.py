@@ -35,6 +35,7 @@ from pydantic import (
     Field,
     field_serializer,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -975,6 +976,46 @@ class StoreConfig(BaseModel):
     root: str = "runs"
 
 
+class SensitivityConfig(BaseModel):
+    """Opt-in deviations for sensitivity runs; nothing here is thesis behaviour.
+
+    ``future_covariate_lags`` replaces the MODEL's ``lags_future_covariates``
+    span (darts ``(n_past, n_future)``) and nothing else. It is deliberately
+    NOT part of :class:`CommonKwargsConfig`: that block feeds the feature
+    selection hash and its provenance check (``data_stage._features_hash``,
+    ``check_selection_provenance``), so changing it there would force a new
+    selection and invalidate the tuned parameters. Here the run keeps the
+    publication selection and ``best_params.json``; only the model's future
+    window moves, and ``run_stage`` adds this block to the stage identity.
+
+    Why it exists (audit 2026-09-30, ``docs/audits/2026-09-30/day1_trace.py``):
+    with ``multi_models=True`` darts gives every horizon's sub-model the same
+    window anchored at the origin, so under ``(2, 7)`` the Day-1 model sees 2
+    days of weather before its target and the Day-7 model 8. ``(8, 7)`` gives
+    every sub-model at least 8 pre-target days.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    future_covariate_lags: tuple[int, int] | None = None
+
+    @field_validator("future_covariate_lags", mode="before")
+    @classmethod
+    def _span(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            return (int(value[0]), int(value[1]))
+        raise ValueError(
+            "sensitivity.future_covariate_lags must be a 2-element span (n_past, n_future), "
+            f"got {value!r} (flag F26: darts reads a list of any other length as explicit lags)"
+        )
+
+    @property
+    def active(self) -> bool:
+        return self.future_covariate_lags is not None
+
+
 class ExperimentConfig(BaseModel):
     """One experiment family, fully resolved.
 
@@ -1029,6 +1070,18 @@ class ExperimentConfig(BaseModel):
     #: :func:`available_threads`, so that one machine's core count never leaks
     #: into :meth:`resolved_hash`.
     threads: int | Literal["auto"] | None = None
+    #: Opt-in sensitivity deviations (:class:`SensitivityConfig`). ``None`` for
+    #: every thesis/publication run, and then left out of every dump, so their
+    #: ``config.yaml`` snapshots are unchanged. Set from the command line with
+    #: ``+sensitivity.future_covariate_lags=[8,7]``.
+    sensitivity: SensitivityConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_sensitivity(self, handler: Any) -> Any:
+        data = handler(self)
+        if self.sensitivity is None and isinstance(data, dict):
+            data.pop("sensitivity", None)
+        return data
 
     # ------------------------------------------------------------------ #
     # derived views
@@ -1154,6 +1207,7 @@ class ExperimentConfig(BaseModel):
             seed=self.seeds.tuning_seed if seed is None else seed,
             device=self.device_for(model_name),
             threads=self.resolved_threads,
+            future_lags=None if self.sensitivity is None else self.sensitivity.future_covariate_lags,
         )
 
     # ------------------------------------------------------------------ #

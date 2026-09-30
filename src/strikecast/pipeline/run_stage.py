@@ -601,6 +601,9 @@ def run_stage(
     }
     if max_folds is not None:
         resolved_stage["max_folds"] = int(max_folds)
+    if cfg.sensitivity is not None:
+        # only when set, so every publication stage keeps its identity
+        resolved_stage["sensitivity"] = cfg.sensitivity.model_dump(mode="json")
     digest = stage_hash(resolved_stage, list(data.upstream), int(seed))
 
     if not force and store.is_complete(key, stage_name, digest):

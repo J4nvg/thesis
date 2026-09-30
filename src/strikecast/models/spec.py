@@ -94,6 +94,10 @@ class RunContext:
     threads: int | None = None
     past_lags: PastLags | None = None
     head_past_lags: tuple[tuple[str, PastLags | None], ...] = ()
+    #: ``sensitivity.future_covariate_lags``: a darts ``(n_past, n_future)``
+    #: span replacing the legacy ``(2, 7)``. ``None`` (every thesis and
+    #: publication run) keeps the legacy skeleton bit-for-bit.
+    future_lags: tuple[int, int] | None = None
 
     def for_head(self, name: str) -> RunContext:
         """This context for composite head ``name``: ``past_lags`` becomes that
@@ -128,6 +132,9 @@ def darts_common_kwargs(ctx: RunContext) -> dict[str, Any]:
         kwargs["lags_past_covariates"] = {
             comp: sorted(int(lag) for lag in lags) for comp, lags in ctx.past_lags
         }
+    if ctx.future_lags is not None:
+        # sensitivity run only (SensitivityConfig): a tuple, darts' span form (F26)
+        kwargs["lags_future_covariates"] = (int(ctx.future_lags[0]), int(ctx.future_lags[1]))
     return kwargs
 
 
