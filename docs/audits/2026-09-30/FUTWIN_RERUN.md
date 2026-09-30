@@ -1,6 +1,6 @@
 # Sensitivity rerun: future-covariate window (count GBDT, seed 42)
 
-Written 2026-09-30. **Status: prepared, not yet submitted.** When the jobs have run, follow
+Written 2026-09-30. **Status: submitted 2026-09-30 from `~/reruns/thesis` (jobs 65021-65039); 16/18 + control complete at last check, the two `catboost_*@local` jobs still running.** When the jobs have run, follow
 "Retrieve" and "Analyse" below; the analysis prints a pre-registered verdict.
 
 ## Why
@@ -20,7 +20,7 @@ so the Day-1 penalty should disappear.
 
 ## What runs
 
-| Store (cluster: `~/thesis-refactor/…`) | Jobs | Window |
+| Store (cluster: `~/reruns/thesis/…`) | Jobs | Window |
 |---|---|---|
 | `runs_sensitivity_futwin/lags_8_7/` | 18: `{lightgbm,xgboost,catboost}_{poisson,tweedie}` × global/activity/local | `(8, 7)` |
 | `runs_sensitivity_futwin/control_2_7/` | 1: `catboost_tweedie@global` | `(2, 7)` through the same switch; must equal `runs_publication` exactly |
@@ -54,7 +54,7 @@ check, not a replacement for the publication numbers.
 On the laptop: commit and push these files to `refactor`. On the cluster (login node):
 
 ```sh
-cd ~/thesis-refactor && git pull
+cd ~/reruns/thesis && git pull
 bash scripts/slurm/sensitivity_futwin.sh --dry-run    # 19 sbatch lines, nothing written
 bash scripts/slurm/sensitivity_futwin.sh              # writes runs_sensitivity_futwin/SUBMISSION.md
 bash scripts/slurm/sensitivity_futwin.sh --status     # queue, complete count, failed log tails
@@ -66,7 +66,7 @@ The last line of each is `STRIKECAST_EXIT <code>`.
 ## Retrieve (laptop, repo root)
 
 ```sh
-rsync -a u808440@aurometalsaurus:thesis-refactor/runs_sensitivity_futwin/ runs_sensitivity_futwin/
+rsync -a uvt:reruns/thesis/runs_sensitivity_futwin/ runs_sensitivity_futwin/   # uvt = ~/.ssh/config alias
 ```
 
 This is a fresh store that only the cluster writes to, so a plain rsync mirror is enough;

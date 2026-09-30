@@ -2,7 +2,7 @@
 
 Read-only. Run on the laptop after pulling the cluster store:
 
-    rsync -a u808440@aurometalsaurus:thesis-refactor/runs_sensitivity_futwin/ runs_sensitivity_futwin/
+    rsync -a uvt:reruns/thesis/runs_sensitivity_futwin/ runs_sensitivity_futwin/
     uv run python docs/audits/2026-09-30/futwin_rerun_analysis.py \
         | tee docs/audits/2026-09-30/futwin_rerun_output.txt
 

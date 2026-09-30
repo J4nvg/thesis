@@ -2,7 +2,7 @@
 # Sensitivity rerun: count-GBDT TEST stage with a wider future-covariate window.
 # Why + how to read the result: docs/audits/2026-09-30/FUTWIN_RERUN.md
 #
-# Run on the LOGIN node from the repo root (~/thesis-refactor). It only copies
+# Run on the LOGIN node from the repo root (e.g. ~/reruns/thesis). It only copies
 # a few small files and calls sbatch; every model run is a SLURM job.
 #
 #     bash scripts/slurm/sensitivity_futwin.sh --dry-run   # print what would happen
@@ -29,7 +29,7 @@ MODE="${1:-submit}"
 
 die() { echo "sensitivity_futwin: $*" >&2; exit 1; }
 
-[ -f scripts/slurm/job.sbatch ] || die "run me from the repo root (~/thesis-refactor)"
+[ -f scripts/slurm/job.sbatch ] || die "run me from the repo root (e.g. ~/reruns/thesis)"
 
 if [ "$MODE" = "--status" ]; then
   echo "== queue"
