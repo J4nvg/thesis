@@ -1,7 +1,18 @@
 # Sensitivity rerun: future-covariate window (count GBDT, seed 42)
 
-Written 2026-09-30. **Status: submitted 2026-09-30 from `~/reruns/thesis` (jobs 65021-65039); 16/18 + control complete at last check, the two `catboost_*@local` jobs still running.** When the jobs have run, follow
-"Retrieve" and "Analyse" below; the analysis prints a pre-registered verdict.
+Written 2026-09-30. **Status: done 2026-10-01 (jobs 65021-65039 from `~/reruns/thesis`), 18/18 + control
+complete. Verdict: REJECTED** (`futwin_rerun_output.txt`):
+
+- R1 control PASS (22960 rows, max |pred diff| = 0).
+- R5: the median Day-1 penalty shrinks only 12 % on MAE (+1.24 % to +1.09 %) and 16 % on RMSE
+  (+2.32 % to +1.95 %); Day 2 still beats Day 1 in 15/18 (RMSE) and 16/18 (MAE) configurations.
+- R4: the wider window is slightly worse overall (median RMSE +0.58 %, MAE +0.09 %), so the
+  publication default `(2, 7)` stays.
+
+So the missing pre-target weather is not the cause of the GBDT Day-1 penalty. What the rerun did *not*
+change: the Day-1 sub-model still sees 6 post-target weather days (13.8 % of its importance in
+`day1_trace.py`); darts' shared window cannot remove them for Day 1 only. The first "next suspect"
+below cannot single out Day 1: every sub-model's freshest training label is 7 days before its target.
 
 ## Why
 

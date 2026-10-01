@@ -1,0 +1,77 @@
+
+==============================================================================================================
+[R0] Inventory
+==============================================================================================================
+publication store: /Users/jan/projects/bsc_thesis_code/thesis/runs_publication_20260929
+(8,7) store:       /Users/jan/projects/bsc_thesis_code/thesis/runs_sensitivity_futwin/lags_8_7  -> 18/18 complete
+
+==============================================================================================================
+[R1] Control: catboost_tweedie@global through the switch with (2,7) == publication run?
+==============================================================================================================
+rows 22960 vs 22960, max |pred diff| = 0 -> PASS
+
+common target dates: 158
+
+==============================================================================================================
+[R2] Day-1 penalty = error(Day 1) / mean error(Days 2-7) - 1, same target dates (%)
+==============================================================================================================
+                   config  RMSE pen 2,7  RMSE pen 8,7  RMSE d2<d1 (8,7)  MAE pen 2,7  MAE pen 8,7  MAE d2<d1 (8,7)
+  lightgbm_poisson@global         -0.60         -0.90             False        -0.12         0.09             True
+lightgbm_poisson@activity          1.67          1.49              True         2.05         1.63             True
+   lightgbm_poisson@local          2.26          0.90             False         1.16        -0.47            False
+  lightgbm_tweedie@global          1.40          1.13              True         1.31         0.80             True
+lightgbm_tweedie@activity          3.25          3.46              True         3.26         3.50             True
+   lightgbm_tweedie@local          3.44          2.12             False         1.22         0.59             True
+   xgboost_poisson@global          2.26          2.13              True         1.12         0.91             True
+ xgboost_poisson@activity          1.58          1.62              True         1.66         1.51             True
+    xgboost_poisson@local          2.69          2.11              True         0.75         0.36             True
+   xgboost_tweedie@global          0.71          1.66              True         0.79         1.10             True
+ xgboost_tweedie@activity          3.08          2.85              True         3.01         2.55             True
+    xgboost_tweedie@local          2.46          1.79              True         0.72        -0.01             True
+  catboost_poisson@global          5.19          3.77              True         2.01         1.11            False
+catboost_poisson@activity          4.32          4.56              True         1.89         1.76             True
+   catboost_poisson@local          2.37          1.49              True         1.27         1.16             True
+  catboost_tweedie@global          2.00          1.49              True         0.93        -0.05             True
+catboost_tweedie@activity          3.42          2.90              True         2.31         1.67             True
+   catboost_tweedie@local          1.69          2.52              True         0.52         1.09             True
+
+median over configurations: RMSE pen 2,7 +2.32  RMSE pen 8,7 +1.95  MAE pen 2,7 +1.24  MAE pen 8,7 +1.09
+
+==============================================================================================================
+[R3] Family-level horizon tests, same target dates: Friedman + Day 2 vs Day 1
+==============================================================================================================
+window 2,7 RMSE: N=18 Friedman chi2=55.5 p=3.63e-10 W=0.51 | Day2<Day1 17/18 | median % vs Day 1, Days 2-7: -2.2 -2.0 -1.2 -2.9 -2.4 -3.1
+window 2,7 MAE: N=18 Friedman chi2=36.1 p=2.67e-06 W=0.33 | Day2<Day1 18/18 | median % vs Day 1, Days 2-7: -1.4 -1.3 -1.3 -1.4 -1.2 -1.5
+window 8,7 RMSE: N=18 Friedman chi2=49.2 p=6.9e-09 W=0.46 | Day2<Day1 15/18 | median % vs Day 1, Days 2-7: -1.6 -2.0 -1.3 -2.3 -1.7 -2.3
+window 8,7 MAE: N=18 Friedman chi2=36.4 p=2.3e-06 W=0.34 | Day2<Day1 16/18 | median % vs Day 1, Days 2-7: -1.1 -1.5 -1.1 -1.2 -0.7 -1.2
+
+==============================================================================================================
+[R4] Overall accuracy (all target dates, all horizons pooled) and per horizon, (8,7) - (2,7)
+==============================================================================================================
+                   config  RMSE 2,7  MAE 2,7  RMSE 8,7  MAE 8,7  dRMSE %  dMAE %  dRMSE h1 %  dRMSE h7 %
+  lightgbm_poisson@global    1.8515   0.7871    1.8615   0.7877   0.5392  0.0724      0.2034      0.9853
+lightgbm_poisson@activity    1.8660   0.7750    1.8741   0.7739   0.4339 -0.1419      0.2590      1.0710
+   lightgbm_poisson@local    1.8901   0.7804    1.8968   0.7785   0.3516 -0.2435     -0.9309      0.5227
+  lightgbm_tweedie@global    1.8806   0.7842    1.8934   0.7850   0.6833  0.0955      0.3999      1.4158
+lightgbm_tweedie@activity    1.8814   0.7653    1.8948   0.7669   0.7132  0.2056      0.8651      0.9672
+   lightgbm_tweedie@local    1.9480   0.7691    1.9631   0.7732   0.7789  0.5296     -0.3942      1.3376
+   xgboost_poisson@global    1.8672   0.7854    1.8794   0.7858   0.6503  0.0424      0.6375      0.7428
+ xgboost_poisson@activity    1.8677   0.7723    1.8803   0.7718   0.6741 -0.0624      0.6851      1.0657
+    xgboost_poisson@local    1.9812   0.7820    2.0073   0.7879   1.3204  0.7595      0.8917      1.9661
+   xgboost_tweedie@global    1.8832   0.7858    1.8909   0.7874   0.4125  0.2009      1.2118      0.2346
+ xgboost_tweedie@activity    1.8957   0.7759    1.9056   0.7766   0.5234  0.0889      0.3052      0.6740
+    xgboost_tweedie@local    2.0230   0.7829    2.0370   0.7880   0.6913  0.6470      0.1925      1.3658
+  catboost_poisson@global    1.8879   0.7943    1.8865   0.7950  -0.0760  0.0824     -1.2383      0.1017
+catboost_poisson@activity    1.8711   0.7682    1.8671   0.7676  -0.2155 -0.0777     -0.1075     -0.0743
+   catboost_poisson@local    2.0352   0.7837    2.0408   0.7864   0.2721  0.3323     -0.5464      0.7462
+  catboost_tweedie@global    1.8446   0.7814    1.8562   0.7818   0.6269  0.0626      0.1108      1.1853
+catboost_tweedie@activity    1.8679   0.7631    1.8765   0.7626   0.4567 -0.0598      0.0498      0.5850
+   catboost_tweedie@local    2.0300   0.7765    2.0482   0.7825   0.8999  0.7736      1.4122      0.7717
+
+median: dRMSE % +0.58  dMAE % +0.09  dRMSE h1 % +0.23  dRMSE h7 % +0.87
+
+==============================================================================================================
+[R5] Verdict (pre-registered in FUTWIN_RERUN.md)
+==============================================================================================================
+median Day-1 penalty MAE +1.24% -> +1.09% (shrinks 12%); RMSE +2.32% -> +1.95% (shrinks 16%)
+REJECTED: widening the window does not remove the penalty. See FUTWIN_RERUN.md 'If rejected'.
