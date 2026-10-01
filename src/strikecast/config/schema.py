@@ -976,6 +976,91 @@ class StoreConfig(BaseModel):
     root: str = "runs"
 
 
+FeatureSpaceMode = Literal[
+    "selected", "all", "random", "groups", "selected_minus", "reselect_only", "reselect_drop"
+]
+
+
+class FeatureSpaceConfig(BaseModel):
+    """``sensitivity.feature_space``: the feature-ablation runs (plan 2026-10-01).
+
+    Replaces the MODEL's feature space for one run; the modes and the nine
+    groups are documented in :mod:`strikecast.data.feature_space` and
+    ``docs/feature_ablation/README.md``. ``k``, ``draw`` and ``stratified``
+    belong to ``random`` only, ``groups`` to every mode but ``selected``,
+    ``all`` and ``random``; a field set for a mode that ignores it is an error,
+    so two configs that build the same space are also the same config (stage
+    identity). ``groups`` is stored in display order, de-duplicated.
+
+    From the command line::
+
+        +sensitivity.feature_space.mode=groups '+sensitivity.feature_space.groups=[weather,cyber]'
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: FeatureSpaceMode
+    k: int = 100
+    draw: int = 0
+    stratified: bool = False
+    groups: tuple[str, ...] = ()
+
+    @field_validator("groups", mode="before")
+    @classmethod
+    def _canonical_groups(cls, value: Any) -> Any:
+        from strikecast.data.feature_space import canonical_groups  # noqa: PLC0415
+
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            value = [value]
+        return canonical_groups(value)
+
+    @model_validator(mode="after")
+    def _fields_fit_the_mode(self) -> FeatureSpaceConfig:
+        from strikecast.data.feature_space import PAST_GROUPS  # noqa: PLC0415
+
+        if self.mode != "random" and (self.k != 100 or self.draw != 0 or self.stratified):
+            raise ValueError(
+                f"feature_space.k/draw/stratified only apply to mode 'random', not {self.mode!r}"
+            )
+        if self.mode == "random" and self.k <= 0:
+            raise ValueError(f"feature_space.k must be positive, got {self.k}")
+        if self.mode in ("selected", "all", "random") and self.groups:
+            raise ValueError(f"feature_space.groups does not apply to mode {self.mode!r}")
+        if self.mode in ("selected_minus", "reselect_drop", "reselect_only") and not self.groups:
+            raise ValueError(f"feature_space mode {self.mode!r} needs at least one group")
+        if self.mode.startswith("reselect") and not set(self.kept_groups) & set(PAST_GROUPS):
+            raise ValueError(
+                f"feature_space mode {self.mode!r} with groups {list(self.groups)} leaves no "
+                "past-covariate pool for the selector to rank"
+            )
+        return self
+
+    @property
+    def kept_groups(self) -> tuple[str, ...]:
+        """The groups this space contains besides the core, in display order."""
+        from strikecast.data.feature_space import kept_groups  # noqa: PLC0415
+
+        return kept_groups(self.mode, self.groups)
+
+    @property
+    def reselects(self) -> bool:
+        """``reselect_*``: a different SELECTION (own features hash), not just a
+        different model feature space."""
+        return self.mode.startswith("reselect")
+
+    @property
+    def calendar_encoders(self) -> bool:
+        """darts' cyclic calendar encoders on (they belong to group ``calendar``)."""
+        return "calendar" in self.kept_groups
+
+    @property
+    def future_covariates(self) -> bool:
+        """Any future input at all (weather, holidays or the encoders)."""
+        return bool({"weather", "calendar"} & set(self.kept_groups))
+
+
 class SensitivityConfig(BaseModel):
     """Opt-in deviations for sensitivity runs; nothing here is thesis behaviour.
 
@@ -1011,9 +1096,27 @@ class SensitivityConfig(BaseModel):
             f"got {value!r} (flag F26: darts reads a list of any other length as explicit lags)"
         )
 
+    #: Feature-ablation runs (:class:`FeatureSpaceConfig`, plan 2026-10-01).
+    #: Unset (``None``) leaves the model's feature space alone; unlike
+    #: ``future_covariate_lags`` its ``reselect_*`` modes DO enter the
+    #: feature-selection hash (``data_stage._features_hash``), because they are
+    #: a different selection.
+    feature_space: FeatureSpaceConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset(self, handler: Any) -> Any:
+        """Leave unset switches out of every dump, so adding a switch never moves
+        the stage identity of a run that does not use it (the futwin stores)."""
+        data = handler(self)
+        if isinstance(data, dict):
+            for key in ("future_covariate_lags", "feature_space"):
+                if getattr(self, key) is None:
+                    data.pop(key, None)
+        return data
+
     @property
     def active(self) -> bool:
-        return self.future_covariate_lags is not None
+        return self.future_covariate_lags is not None or self.feature_space is not None
 
 
 class ExperimentConfig(BaseModel):
@@ -1208,7 +1311,19 @@ class ExperimentConfig(BaseModel):
             device=self.device_for(model_name),
             threads=self.resolved_threads,
             future_lags=None if self.sensitivity is None else self.sensitivity.future_covariate_lags,
+            **self._feature_space_flags(),
         )
+
+    def _feature_space_flags(self) -> dict[str, bool]:
+        """``RunContext`` encoder/future switches of ``sensitivity.feature_space``;
+        empty (the legacy skeleton) when it is unset."""
+        fs = None if self.sensitivity is None else self.sensitivity.feature_space
+        if fs is None:
+            return {}
+        return {
+            "calendar_encoders": fs.calendar_encoders,
+            "future_covariates": fs.future_covariates,
+        }
 
     # ------------------------------------------------------------------ #
     # identity

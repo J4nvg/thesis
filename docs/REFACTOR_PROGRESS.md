@@ -1410,3 +1410,34 @@ Poisson/Tweedie, Global or Activity; Local excluded) and the best Chronos-2 vari
 - Cluster job NOT yet submitted: `scripts/slurm/sensitivity_futwin.sh` (19 test jobs into
   `runs_sensitivity_futwin/`), analysis `docs/audits/2026-09-30/futwin_rerun_analysis.py`, plan, retrieval
   and pre-registered verdict in `docs/audits/2026-09-30/FUTWIN_RERUN.md`. Nothing committed yet.
+
+## Horizon figures in absolute units — 2026-09-30
+
+- `docs/audits/2026-09-30/horizon_figure.py`: all three figures (`horizon_sig_designA/B`, `horizon_family_designB`,
+  png + svg) now plot absolute RMSE / MAE instead of % change vs Day 1. Medians are taken on the absolute values;
+  the 0% line and "vs Day 1 (%)" wording are gone; y-limits are tight to the data plus bracket headroom; medians got a
+  white halo so they read over the thin lines; bracket step rescaled to the absolute span; family end-labels are
+  pushed apart when the two medians coincide. Statistics (`horizon_pipeline.py`) untouched.
+- `main_family` uses `lb.head(20)` (11 GBDT / 9 other), unchanged from the first version.
+- Caveat: between-configuration spread (MAE 0.70-0.87) dwarfs the change across horizons (~1%), so the Day-1 step
+  is visible only for GBDT RMSE; MAE effects are small lines on a wide axis. Two low-MAE configurations (~0.71-0.72)
+  and one high (~0.86) stretch the MAE axis; kept as real data.
+
+## Feature ablation (prepared, not submitted) — 2026-10-01
+
+- New experiment: what the gain selector buys and which feature groups carry signal; pilot catboost_tweedie@global,
+  test stage. Jan's design: DEFAULT params everywhere (fair comparison) except a tuned control `selected_tuned`
+  that must reproduce runs_publication; core = target lags + 2 statics; 9 groups = importance-figure categories
+  (calendar = holidays + darts cyclic encoders); leave-one-out from the selected 100, fixed AND re-selected;
+  3 seeds (42,1,2) for selected/all/core/random. 37 variants = 53 CPU jobs (`docs/feature_ablation/variants.tsv`).
+- Code (opt-in, default runs unchanged): `sensitivity.feature_space` (`FeatureSpaceConfig` in schema; unset
+  switches left out of the dump so futwin identities do not move), `src/strikecast/data/feature_space.py`,
+  `data_stage._apply_feature_space` / `_reselect_features` (only `reselect_*` enter the features hash),
+  `RunContext.calendar_encoders` / `future_covariates`, empty `past_lags` -> no past covariates,
+  `run_stage._covariates` passes None for switched-off kinds and writes `<run>/feature_space.json`.
+- Checked on the publication store (no training): `all` = 1785 pairs, stratified draw = 17/22/32/20/9, `core` has
+  no past/future/encoders, selection hash stays a5c51cd6 for every non-reselect mode.
+- Tests: `tests/unit/test_feature_space.py` (58). Full unit suite 1355 passed + the 4 known PYTHONHASHSEED-only
+  failures (pass with `PYTHONHASHSEED=0`).
+- Submit: `scripts/slurm/feature_ablation.sh` (`--list/--dry-run/--status/--combo`); analysis + figures +
+  README + PROMOTING_FIGURES.md in `docs/feature_ablation/` (selftest: R1 PASS, all deltas 0). Nothing committed.

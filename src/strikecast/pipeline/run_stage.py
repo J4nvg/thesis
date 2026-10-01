@@ -43,6 +43,7 @@ Behaviour notes, all legacy-faithful and all flagged in ``docs/REFACTOR_PLAN.md`
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -394,11 +395,22 @@ def model_targets_for(
 
 def _covariates(
     spec: ModelSpec, data: DataArtifacts
-) -> tuple[list[TimeSeries], list[TimeSeries]]:
-    """Past and future covariates for one model (F28: RNNs take the raw past)."""
+) -> tuple[list[TimeSeries] | None, list[TimeSeries] | None]:
+    """Past and future covariates for one model (F28: RNNs take the raw past).
+
+    ``None`` for a kind a feature-ablation space switched off entirely
+    (``FeatureSets.use_past`` / ``use_future``); the engine and the adapters
+    take ``None`` as "no such covariates".
+    """
     bundle = data.bundle
+    features = getattr(data, "features", None)
     past = bundle.raw_past_covs if spec.needs_raw_past_covs else bundle.past_covs
-    return list(past), list(bundle.future_covs)
+    use_past = getattr(features, "use_past", True)
+    use_future = getattr(features, "use_future", True)
+    return (
+        list(past) if use_past else None,
+        list(bundle.future_covs) if use_future else None,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -645,6 +657,8 @@ def run_stage(
         if tracked_id:
             env = {**env, "tracker_run_id": tracked_id}
         store.write_env(key, env)
+        if cfg.sensitivity is not None and cfg.sensitivity.feature_space is not None:
+            _write_feature_space(store, key, cfg, ctx, data)
         if tracked_id:
             # §5.5: the run directory must name its mirror. The store owns the
             # merge, so `env.json` keeps the id of every stage, not just this one.
@@ -1026,3 +1040,33 @@ def run_experiment(
                             )
                         )
     return outcomes
+
+
+def _write_feature_space(
+    store: RunStore, key: RunKey, cfg: ExperimentConfig, ctx: Any, data: DataArtifacts
+) -> Path:
+    """``<run>/feature_space.json``: what a feature-ablation run actually trained
+    on (mode, groups, pair counts per group, the exact pairs, future inputs,
+    encoders, the selection it came from). Read by
+    ``docs/feature_ablation/analysis.py``; never by the pipeline."""
+    from strikecast.data.feature_space import describe  # noqa: PLC0415
+
+    fs = cfg.sensitivity.feature_space  # type: ignore[union-attr]
+    features = data.features
+    past_lags = ctx.past_lags if getattr(features, "use_past", True) else ()
+    payload = describe(
+        past_lags,
+        features.future_keep if getattr(features, "use_future", True) else [],
+        **fs.model_dump(mode="json"),
+        kept_groups=list(fs.kept_groups),
+        calendar_encoders=bool(ctx.calendar_encoders),
+        future_covariates=bool(ctx.future_covariates),
+        features_hash=features.hash,
+        features_source=features.source,
+    )
+    path = store.resolve(key) / "feature_space.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    return path

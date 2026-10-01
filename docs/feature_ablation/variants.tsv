@@ -1,0 +1,42 @@
+# Feature-ablation variants (docs/feature_ablation/README.md). One store per variant:
+# runs_feature_ablation/<variant>/. Read by scripts/slurm/feature_ablation.sh and
+# docs/feature_ablation/analysis.py. Columns are TAB-separated; `overrides` is a
+# space-separated list of Hydra overrides appended to every job of the variant.
+variant	seeds	params	time	family	contrast	overrides
+selected_tuned	42	tuned	03:00:00	control	reproduces runs_publication	+sensitivity.feature_space.mode=selected
+selected	42,1,2	defaults	03:00:00	selector	reference	+sensitivity.feature_space.mode=selected
+all	42,1,2	defaults	06:00:00	selector	vs selected	+sensitivity.feature_space.mode=all
+core	42,1,2	defaults	03:00:00	groups	reference for only_*	+sensitivity.feature_space.mode=groups +sensitivity.feature_space.groups=[]
+random_d1	42,1,2	defaults	03:00:00	selector	vs selected	+sensitivity.feature_space.mode=random +sensitivity.feature_space.draw=1
+random_d2	42,1,2	defaults	03:00:00	selector	vs selected	+sensitivity.feature_space.mode=random +sensitivity.feature_space.draw=2
+random_d3	42,1,2	defaults	03:00:00	selector	vs selected	+sensitivity.feature_space.mode=random +sensitivity.feature_space.draw=3
+random_d4	42,1,2	defaults	03:00:00	selector	vs selected (stratified)	+sensitivity.feature_space.mode=random +sensitivity.feature_space.draw=4 +sensitivity.feature_space.stratified=true
+random_d5	42,1,2	defaults	03:00:00	selector	vs selected (stratified)	+sensitivity.feature_space.mode=random +sensitivity.feature_space.draw=5 +sensitivity.feature_space.stratified=true
+only_strikes	42	defaults	03:00:00	only	vs core	+sensitivity.feature_space.mode=groups +sensitivity.feature_space.groups=[strikes]
+only_spatial	42	defaults	03:00:00	only	vs core	+sensitivity.feature_space.mode=groups +sensitivity.feature_space.groups=[spatial]
+only_conflict	42	defaults	03:00:00	only	vs core	+sensitivity.feature_space.mode=groups +sensitivity.feature_space.groups=[conflict]
+only_comms	42	defaults	06:00:00	only	vs core	+sensitivity.feature_space.mode=groups +sensitivity.feature_space.groups=[comms]
+only_macro	42	defaults	03:00:00	only	vs core	+sensitivity.feature_space.mode=groups +sensitivity.feature_space.groups=[macro]
+only_missile	42	defaults	03:00:00	only	vs core	+sensitivity.feature_space.mode=groups +sensitivity.feature_space.groups=[missile]
+only_cyber	42	defaults	03:00:00	only	vs core	+sensitivity.feature_space.mode=groups +sensitivity.feature_space.groups=[cyber]
+only_weather	42	defaults	03:00:00	only	vs core	+sensitivity.feature_space.mode=groups +sensitivity.feature_space.groups=[weather]
+only_calendar	42	defaults	03:00:00	only	vs core	+sensitivity.feature_space.mode=groups +sensitivity.feature_space.groups=[calendar]
+drop_strikes	42	defaults	03:00:00	drop	vs selected	+sensitivity.feature_space.mode=selected_minus +sensitivity.feature_space.groups=[strikes]
+drop_spatial	42	defaults	03:00:00	drop	vs selected	+sensitivity.feature_space.mode=selected_minus +sensitivity.feature_space.groups=[spatial]
+drop_conflict	42	defaults	03:00:00	drop	vs selected	+sensitivity.feature_space.mode=selected_minus +sensitivity.feature_space.groups=[conflict]
+drop_comms	42	defaults	03:00:00	drop	vs selected	+sensitivity.feature_space.mode=selected_minus +sensitivity.feature_space.groups=[comms]
+drop_macro	42	defaults	03:00:00	drop	vs selected	+sensitivity.feature_space.mode=selected_minus +sensitivity.feature_space.groups=[macro]
+drop_weather	42	defaults	03:00:00	drop	vs selected	+sensitivity.feature_space.mode=selected_minus +sensitivity.feature_space.groups=[weather]
+drop_calendar	42	defaults	03:00:00	drop	vs selected	+sensitivity.feature_space.mode=selected_minus +sensitivity.feature_space.groups=[calendar]
+reselect_drop_strikes	42	defaults	03:00:00	reselect_drop	vs selected	+sensitivity.feature_space.mode=reselect_drop +sensitivity.feature_space.groups=[strikes]
+reselect_drop_spatial	42	defaults	03:00:00	reselect_drop	vs selected	+sensitivity.feature_space.mode=reselect_drop +sensitivity.feature_space.groups=[spatial]
+reselect_drop_conflict	42	defaults	03:00:00	reselect_drop	vs selected	+sensitivity.feature_space.mode=reselect_drop +sensitivity.feature_space.groups=[conflict]
+reselect_drop_comms	42	defaults	03:00:00	reselect_drop	vs selected	+sensitivity.feature_space.mode=reselect_drop +sensitivity.feature_space.groups=[comms]
+reselect_drop_macro	42	defaults	03:00:00	reselect_drop	vs selected	+sensitivity.feature_space.mode=reselect_drop +sensitivity.feature_space.groups=[macro]
+reselect_drop_weather	42	defaults	03:00:00	reselect_drop	vs selected	+sensitivity.feature_space.mode=reselect_drop +sensitivity.feature_space.groups=[weather]
+reselect_drop_calendar	42	defaults	03:00:00	reselect_drop	vs selected	+sensitivity.feature_space.mode=reselect_drop +sensitivity.feature_space.groups=[calendar]
+reselect_only_comms	42	defaults	03:00:00	reselect_only	vs core and only_comms	+sensitivity.feature_space.mode=reselect_only +sensitivity.feature_space.groups=[comms]
+reselect_only_conflict	42	defaults	03:00:00	reselect_only	vs core and only_conflict	+sensitivity.feature_space.mode=reselect_only +sensitivity.feature_space.groups=[conflict]
+reselect_only_macro	42	defaults	03:00:00	reselect_only	vs core and only_macro	+sensitivity.feature_space.mode=reselect_only +sensitivity.feature_space.groups=[macro]
+reselect_only_cyber	42	defaults	03:00:00	reselect_only	vs core and only_cyber	+sensitivity.feature_space.mode=reselect_only +sensitivity.feature_space.groups=[cyber]
+reselect_only_spatial	42	defaults	03:00:00	reselect_only	vs core and only_spatial	+sensitivity.feature_space.mode=reselect_only +sensitivity.feature_space.groups=[spatial]

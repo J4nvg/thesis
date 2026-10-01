@@ -98,6 +98,11 @@ class RunContext:
     #: span replacing the legacy ``(2, 7)``. ``None`` (every thesis and
     #: publication run) keeps the legacy skeleton bit-for-bit.
     future_lags: tuple[int, int] | None = None
+    #: ``sensitivity.feature_space`` (feature ablation, plan 2026-10-01): darts'
+    #: cyclic calendar encoders on/off, and any future input at all. Both
+    #: ``True`` everywhere else, which is the legacy skeleton.
+    calendar_encoders: bool = True
+    future_covariates: bool = True
 
     def for_head(self, name: str) -> RunContext:
         """This context for composite head ``name``: ``past_lags`` becomes that
@@ -124,17 +129,29 @@ def darts_common_kwargs(ctx: RunContext) -> dict[str, Any]:
     stage subsets the past covariates to ``past_keep`` = the keys of
     ``past_lags``, which guarantees it. Future covariates keep the legacy
     ``(2, 7)`` window for every component.
+
+    Feature-ablation runs only (``sensitivity.feature_space``): an EMPTY
+    ``past_lags`` (``()``) means no past covariates at all
+    (``lags_past_covariates=None``; the run stage then passes none),
+    ``calendar_encoders=False`` drops the cyclic encoders and
+    ``future_covariates=False`` drops the future window.
     """
     from strikecast.data.feature_selection import legacy_common_kwargs
 
     kwargs = legacy_common_kwargs()
     if ctx.past_lags is not None:
-        kwargs["lags_past_covariates"] = {
-            comp: sorted(int(lag) for lag in lags) for comp, lags in ctx.past_lags
-        }
+        kwargs["lags_past_covariates"] = (
+            {comp: sorted(int(lag) for lag in lags) for comp, lags in ctx.past_lags}
+            if ctx.past_lags
+            else None
+        )
     if ctx.future_lags is not None:
         # sensitivity run only (SensitivityConfig): a tuple, darts' span form (F26)
         kwargs["lags_future_covariates"] = (int(ctx.future_lags[0]), int(ctx.future_lags[1]))
+    if not ctx.calendar_encoders:
+        kwargs["add_encoders"] = None
+    if not ctx.future_covariates:
+        kwargs["lags_future_covariates"] = None
     return kwargs
 
 

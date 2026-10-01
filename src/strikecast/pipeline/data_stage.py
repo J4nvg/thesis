@@ -66,7 +66,7 @@ import json
 import logging
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -139,6 +139,12 @@ class FeatureSets:
     hash: str
     path: Path | None = None
     past_lags: tuple[tuple[str, tuple[int, ...]], ...] | None = None
+    #: Feature-ablation runs only (``sensitivity.feature_space``): ``False``
+    #: means the model gets NO past / future covariate series at all. The
+    #: bundle then still holds the full list (darts cannot build a series with
+    #: zero components), and ``run_stage._covariates`` passes ``None`` instead.
+    use_past: bool = True
+    use_future: bool = True
 
 
 @dataclass(frozen=True)
@@ -276,13 +282,30 @@ def _series_hash(cfg: ExperimentConfig, panel_hash: str) -> str:
 
 
 def _features_hash(cfg: ExperimentConfig, panel_hash: str, series_hash: str) -> str:
-    return content_hash(
+    parts: list[Any] = [
         "feature_selection",
         cfg.feature_selection.model_dump(mode="json"),
         cfg.common_kwargs.model_dump(mode="json"),
         panel_hash,
         series_hash,
-    )
+    ]
+    reselect = _reselect_space(cfg)
+    if reselect is not None:
+        # a re-selection on a restricted pool is a different selection; every
+        # other feature space keeps the publication hash (and its tuned params)
+        parts.append({"feature_space": reselect.model_dump(mode="json")})
+    return content_hash(*parts)
+
+
+def _feature_space(cfg: ExperimentConfig) -> Any:
+    """``cfg.sensitivity.feature_space`` or ``None`` (every non-ablation run)."""
+    return None if cfg.sensitivity is None else cfg.sensitivity.feature_space
+
+
+def _reselect_space(cfg: ExperimentConfig) -> Any:
+    """The feature space when it is a ``reselect_*`` mode, else ``None``."""
+    fs = _feature_space(cfg)
+    return fs if fs is not None and fs.reselects else None
 
 
 def _store_for(cfg: ExperimentConfig, store: RunStore | None) -> RunStore:
@@ -627,6 +650,11 @@ def selection_provenance(
         "features_hash": digest,
         "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
         "versions": _library_versions(),
+        **(
+            {"feature_space": _reselect_space(cfg).model_dump(mode="json")}
+            if _reselect_space(cfg) is not None
+            else {}
+        ),
     }
 
 
@@ -678,6 +706,8 @@ def check_selection_provenance(
     if cfg.feature_selection.protocol == "figure":
         # the figure's diff_l2 target follows the transform (Q8 resolved)
         expected["transform"] = cfg.transform.kind
+    if _reselect_space(cfg) is not None:
+        expected["feature_space"] = _reselect_space(cfg).model_dump(mode="json")
     diffs = [key for key, want in expected.items() if provenance.get(key) != want]
     if diffs:
         detail = "; ".join(
@@ -800,11 +830,24 @@ def build_or_load_features(
 
         target_train = model_space_parts(bundle)["target_train"]
 
+    selector = cfg.feature_selection.build()
+    future_covs = bundle.future_covs
+    reselect = _reselect_space(cfg)
+    if reselect is not None:
+        # The re-selection sees exactly the future inputs its model will see
+        # (the caller already subset the bundle to the restricted pool).
+        kwargs = dict(selector.model_kwargs)
+        if not reselect.calendar_encoders:
+            kwargs["add_encoders"] = None
+        if not reselect.future_covariates:
+            kwargs["lags_future_covariates"] = None
+            future_covs = None
+        selector = selector.model_copy(update={"model_kwargs": kwargs})
     selection = select_top_k(
         target_train,
         bundle.past_covs,
-        bundle.future_covs,
-        cfg.feature_selection.build(),
+        future_covs,
+        selector,
         sample_weight=_selection_sample_weight(cfg, bundle),
         protocol=protocol,
     )
@@ -1085,16 +1128,34 @@ def _prepare_one(
         cache=cache,
         force=force,
     )
-    features = build_or_load_features(
-        cfg,
-        store,
+    space = _feature_space(cfg)
+    if space is not None and space.reselects:
+        features = _reselect_features(
+            cfg,
+            store,
+            bundle,
+            panel_hash=panel_hash,
+            series_hash=series_hash,
+            force=force,
+            compute=compute_features,
+        )
+    else:
+        features = build_or_load_features(
+            cfg,
+            store,
+            bundle,
+            panel_hash=panel_hash,
+            series_hash=series_hash,
+            force=force,
+            compute=compute_features,
+        )
+        if space is not None and space.mode != "selected":
+            features = _apply_feature_space(cfg, features, bundle)
+    selected = subset_components(
         bundle,
-        panel_hash=panel_hash,
-        series_hash=series_hash,
-        force=force,
-        compute=compute_features,
+        features.past_keep if features.use_past else _components_of(bundle.raw.past),
+        features.future_keep if features.use_future else _components_of(bundle.raw.future),
     )
-    selected = subset_components(bundle, features.past_keep, features.future_keep)
 
     return DataArtifacts(
         bundle=selected,
@@ -1103,4 +1164,120 @@ def _prepare_one(
         series_hash=series_hash,
         activity_by_region=dict(bundle.activity_by_region or activity or {}),
         panel=panel if keep_panel else None,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# feature-ablation runs (sensitivity.feature_space, plan 2026-10-01)
+# --------------------------------------------------------------------------- #
+def _components_of(series_list: Sequence[Any] | None) -> list[str]:
+    """Component names of the first series of a (raw) list; [] when absent."""
+    if not series_list:
+        return []
+    return [str(c) for c in series_list[0].components]
+
+
+def _apply_feature_space(
+    cfg: ExperimentConfig, features: FeatureSets, bundle: SeriesBundle
+) -> FeatureSets:
+    """The cached selection's :class:`FeatureSets` turned into the ablation's
+    feature space (every mode but ``selected`` and ``reselect_*``).
+
+    The hash is the selection's own, so the tuned parameters (and the stage's
+    upstream identity) still point at the selection the space was derived from;
+    the space itself enters the stage identity through ``cfg.sensitivity``.
+    """
+    from strikecast.data.feature_space import resolve_space  # noqa: PLC0415
+
+    if bundle.raw is None:
+        raise ValueError("a feature-ablation run needs the un-encoded series (bundle.raw)")
+    fs = _feature_space(cfg)
+    past_lags, future_keep = resolve_space(
+        fs.mode,
+        groups=fs.groups,
+        k=fs.k,
+        draw=fs.draw,
+        stratified=fs.stratified,
+        selected_past_lags=features.past_lags,
+        past_components=_components_of(bundle.raw.past),
+        future_components=_components_of(bundle.raw.future),
+        lag_grid=cfg.common_kwargs.lags_past_covariates,
+    )
+    logger.info(
+        "feature space %s (groups %s): %d past pairs over %d components, %d future components, "
+        "calendar encoders %s",
+        fs.mode,
+        list(fs.kept_groups),
+        sum(len(lags) for _, lags in past_lags),
+        len(past_lags),
+        len(future_keep),
+        "on" if fs.calendar_encoders else "off",
+    )
+    return replace(
+        features,
+        past_keep=[component for component, _ in past_lags],
+        future_keep=list(future_keep),
+        past_lags=past_lags,
+        source=f"sensitivity:{fs.mode}",
+        use_past=bool(past_lags),
+        use_future=bool(future_keep),
+    )
+
+
+def _reselect_features(
+    cfg: ExperimentConfig,
+    store: RunStore | None,
+    bundle: SeriesBundle,
+    *,
+    panel_hash: str,
+    series_hash: str,
+    force: bool,
+    compute: bool | None,
+) -> FeatureSets:
+    """``reselect_only`` / ``reselect_drop``: run the family's selector on the
+    restricted pool and return that selection.
+
+    The bundle is subset to the restricted past AND future components first, so
+    ``select_top_k`` ranks only that pool and fits with the future inputs the
+    model will get (:func:`build_or_load_features` also drops the encoders /
+    the future window when the space has none). The selection is cached under
+    its own hash (:func:`_features_hash`), so ``require_cached`` does not apply:
+    a re-selection is part of the ablation run itself, and the job wrapper pins
+    ``PYTHONHASHSEED=0`` for the deterministic selector.
+    """
+    from strikecast.data.feature_space import restricted_components  # noqa: PLC0415
+    from strikecast.data.series import subset_components  # noqa: PLC0415
+
+    if bundle.raw is None:
+        raise ValueError("a feature-ablation run needs the un-encoded series (bundle.raw)")
+    fs = _feature_space(cfg)
+    all_future = _components_of(bundle.raw.future)
+    past_pool, future_pool = restricted_components(
+        fs.mode, fs.groups, _components_of(bundle.raw.past), all_future
+    )
+    pool_bundle = subset_components(bundle, past_pool, future_pool or all_future)
+    logger.info(
+        "feature space %s (groups %s): re-selecting top-%d from %d past components, "
+        "%d future components",
+        fs.mode,
+        list(fs.kept_groups),
+        cfg.feature_selection.top_k,
+        len(past_pool),
+        len(future_pool),
+    )
+    features = build_or_load_features(
+        cfg,
+        store,
+        pool_bundle,
+        panel_hash=panel_hash,
+        series_hash=series_hash,
+        force=force,
+        compute=True if compute is None else compute,
+    )
+    return replace(
+        features,
+        future_keep=list(future_pool),
+        source=f"sensitivity:{fs.mode}:{features.source}",
+        use_past=bool(features.past_keep),
+        use_future=bool(future_pool),
     )
